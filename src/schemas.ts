@@ -132,14 +132,13 @@ export const Output = z
       'Where to save in R2; overwrites an existing file. Default: "outputs/<uuid>.pdf", which the recommended expiry rule deletes after 7 days. Keys outside outputs/ and extracted/ are kept.',
     ),
     filename: z.string().max(255).optional().describe('Name offered when the PDF is opened or saved. Default: "document.pdf".'),
-    return: z
-      .enum(["json", "pdf"])
-      .default("json")
-      .describe('"json": a PdfResult with a signed link. "pdf": the PDF bytes, with X-File-Key, X-File-Url and X-Page-Count headers.'),
-    store: z.boolean().default(true).describe('Save to R2. With false and return "json", the PDF comes back as base64.'),
+    store: z.boolean().default(true).describe("Save to R2. With false, a JSON response carries the PDF as base64."),
     linkTtl: LinkTtl.optional(),
     useObjectStreams: z.boolean().default(true).describe("Compress objects into streams (smaller files). false writes a classic cross-reference table for old tools."),
   })
-  .default({ return: "json", store: true, useObjectStreams: true })
-  .meta({ id: "Output", description: "What to do with the PDF this request produces." });
+  .default({ store: true, useObjectStreams: true })
+  .meta({
+    id: "Output",
+    description: "What to do with the PDF this request produces. Send Accept: application/pdf to get the PDF bytes instead of a JSON PdfResult.",
+  });
 export type Output = z.infer<typeof Output>;

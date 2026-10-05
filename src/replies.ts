@@ -23,7 +23,7 @@ const pdfFacts = {
 };
 export const StoredPdf = z.object({ ...storedFile, ...pdfFacts }).meta({ id: "StoredPdf", description: "The PDF was saved to R2." });
 export const InlinePdf = z.object({ ...inlineFile, ...pdfFacts }).meta({ id: "InlinePdf", description: 'The PDF itself, for output.store: false.' });
-export const PdfResult = z.union([StoredPdf, InlinePdf]).meta({ id: "PdfResult", description: 'Result of create, edit or merge with output.return "json" (the default).' });
+export const PdfResult = z.union([StoredPdf, InlinePdf]).meta({ id: "PdfResult", description: "Result of create, edit or merge as JSON (the default; see the Accept header)." });
 
 const PageInfo = z
   .object({

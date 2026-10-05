@@ -45,7 +45,7 @@ A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.c
 | **Read** page count, sizes, boxes, metadata, form fields, layers, viewer settings, attachments, PDF/A level | `POST /pdf/info` |
 | **Extract text** (per page, optionally with positions and fonts) | `POST /pdf/text` |
 | **Chain** calls: feed one result into the next | pass the returned `key` or `url` as a source |
-| Get the result as a **link**, the **raw PDF**, or **base64** | `output.return`, `output.store` |
+| Get the result as a **link**, the **raw PDF**, or **base64** | JSON by default; `Accept: application/pdf` for the bytes; `output.store: false` for base64 |
 | Write PDFs **old tools** can read (classic cross-reference table) | `output.useObjectStreams: false` |
 
 Every PDF-producing endpoint (`create`, `edit`, `merge`) takes the same `operations` list, run in order, so one request can stitch, watermark, number, tag and lock a document.
@@ -147,18 +147,19 @@ If you leave out `source`, the single uploaded file (or the one in field `file`)
 
 ## Getting results back
 
-`create`, `edit` and `merge` take an optional `output`:
+`create`, `edit` and `merge` reply with JSON, or with the PDF itself when you send `Accept: application/pdf`. JSON is used when there's no Accept header, for `*/*` and for browsers' Accept headers; otherwise the type with the higher `q` wins, and at equal quality the first listed. Errors are always JSON. The replies carry `Vary: Accept`.
+
+They also take an optional `output`:
 
 ```json
-{ "key": "invoices/42.pdf", "filename": "invoice.pdf", "return": "json", "store": true, "linkTtl": 3600 }
+{ "key": "invoices/42.pdf", "filename": "invoice.pdf", "store": true, "linkTtl": 3600 }
 ```
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `key` | `outputs/<uuid>.pdf` | Where to save in R2 (overwrites an existing file). Files under `outputs/` and `extracted/` are deleted after 7 days; keys elsewhere are kept |
 | `filename` | `document.pdf` | Name offered when the PDF is opened or saved |
-| `return` | `json` | `json`: details and a link. `pdf`: the PDF bytes. |
-| `store` | `true` | Save to R2. With `false` and `return: json`, the PDF comes back as `base64`. |
+| `store` | `true` | Save to R2. With `false`, a JSON reply carries the PDF as `base64`. |
 | `linkTtl` | `SIGNED_URL_TTL` | Link lifetime in seconds, up to 604800 (7 days) |
 | `useObjectStreams` | `true` | `false` writes a classic cross-reference table (larger file, readable by old tools) |
 
@@ -169,7 +170,11 @@ JSON reply:
   "expiresAt": "2026-10-05T02:00:00.000Z", "size": 25400, "pageCount": 6 }
 ```
 
-With `return: pdf`, headers `X-Page-Count`, and when stored `X-File-Key` and `X-File-Url`, describe the result.
+With `Accept: application/pdf`, the headers `X-Page-Count`, and when stored `X-File-Key` and `X-File-Url`, describe the result:
+
+```sh
+curl -s -H "$H" -H 'Content-Type: application/json' -H 'Accept: application/pdf' "$API/pdf/create" -d '{}' -o new.pdf -D -
+```
 
 Download a stored result with `GET /files/<key>` (with the key) or its signed `url` (without). Supports `Range` requests (for PDF viewers) and `If-None-Match`; add `?download` to force a save dialog.
 
@@ -415,9 +420,8 @@ curl -s -H "$H" -H "$J" "$API/pdf/merge" -d '{
 curl -s -H "$H" "$API/pdf/merge" -F files=@one.pdf -F files=@two.pdf -F files=@three.pdf
 
 # Mix uploads and URLs, pick pages, get the PDF straight back
-curl -s -H "$H" "$API/pdf/merge" -o out.pdf -F cover=@cover.pdf -F 'options={
-  "sources": [{ "upload": "cover" }, { "url": "https://example.com/report.pdf", "pages": "2-last" }],
-  "output": { "return": "pdf" }
+curl -s -H "$H" -H 'Accept: application/pdf' "$API/pdf/merge" -o out.pdf -F cover=@cover.pdf -F 'options={
+  "sources": [{ "upload": "cover" }, { "url": "https://example.com/report.pdf", "pages": "2-last" }]
 }'
 
 # Scans and photos into one PDF, logo in the corner, copyright set
@@ -444,11 +448,10 @@ curl -s -H "$H" -H "$J" "$API/pdf/edit" -d '{
 
 # See a form's fields, then fill and flatten it (non-Latin names need a font)
 curl -s -H "$H" -H "$J" "$API/pdf/info" -d '{ "source": "https://example.com/form.pdf" }'
-curl -s -H "$H" -H "$J" "$API/pdf/edit" -o filled.pdf -d '{
+curl -s -H "$H" -H "$J" -H 'Accept: application/pdf' "$API/pdf/edit" -o filled.pdf -d '{
   "source": "https://example.com/form.pdf",
   "operations": [{ "op": "fillForm", "fields": { "name": "Пётр", "agree": true },
-                   "font": { "url": "https://example.com/NotoSans-Regular.ttf" }, "flatten": true }],
-  "output": { "return": "pdf" }
+                   "font": { "url": "https://example.com/NotoSans-Regular.ttf" }, "flatten": true }]
 }'
 
 # Fill a scanned form (no fields) by writing at positions measured from the top

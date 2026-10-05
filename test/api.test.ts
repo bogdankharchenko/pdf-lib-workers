@@ -217,14 +217,60 @@ describe("pdf", () => {
   });
 
   it("returns PDF bytes or base64 instead of a link", async () => {
-    const res = await post("/pdf/create", { output: { return: "pdf", key: "tests/direct.pdf", filename: "x.pdf" } });
+    const res = await call("/pdf/create", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/pdf" },
+      body: JSON.stringify({ output: { key: "tests/direct.pdf", filename: "x.pdf" } }),
+    });
     expect(res.headers.get("content-type")).toBe("application/pdf");
     expect(res.headers.get("x-file-key")).toBe("tests/direct.pdf");
+    expect(res.headers.get("x-page-count")).toBe("1");
     expect(new TextDecoder().decode((await res.arrayBuffer()).slice(0, 5))).toBe("%PDF-");
 
     const unstored = await json(post("/pdf/create", { output: { store: false } }));
     expect(unstored.key).toBeUndefined();
     expect(atob(unstored.base64).startsWith("%PDF-")).toBe(true);
+  });
+
+  it("picks JSON or PDF from the Accept header", async () => {
+    const format = async (accept?: string) => {
+      const res = await call("/pdf/create", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(accept === undefined ? {} : { accept }) },
+        body: "{}",
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("vary")).toBe("Accept");
+      return res.headers.get("content-type")!.split(";")[0];
+    };
+    expect(await format()).toBe("application/json");
+    expect(await format("*/*")).toBe("application/json");
+    expect(await format("application/json")).toBe("application/json");
+    expect(await format("application/pdf")).toBe("application/pdf");
+    expect(await format("application/pdf;q=0.5, application/json")).toBe("application/json");
+    expect(await format("application/json;q=0.5, application/pdf")).toBe("application/pdf");
+    // Equal quality: the first listed wins.
+    expect(await format("application/json, application/pdf")).toBe("application/json");
+    expect(await format("application/pdf, application/json")).toBe("application/pdf");
+    // What a browser sends.
+    expect(await format("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")).toBe("application/json");
+  });
+
+  it("keeps errors as JSON when the PDF was asked for", async () => {
+    const res = await call("/pdf/edit", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/pdf" },
+      body: JSON.stringify({ source: { key: "missing.pdf" }, operations: [{ op: "deleteXFA" }] }),
+    });
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect((await res.json<any>()).error).toContain("missing.pdf");
+  });
+
+  it("no longer accepts output.return", async () => {
+    // Unknown output fields are ignored, so the old option silently has no effect: JSON comes back.
+    const res = await post("/pdf/create", { output: { return: "pdf" } });
+    expect(res.headers.get("content-type")).toContain("application/json");
   });
 
   it("gives clear errors", async () => {

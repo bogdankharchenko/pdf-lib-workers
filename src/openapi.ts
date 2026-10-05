@@ -20,7 +20,7 @@ const DESCRIPTION = `Edit, merge, split, fill, stamp and inspect PDFs. Results a
 
 **Sending files.** Any field typed Source, PdfSource or MergeSource accepts a URL string, an R2 key string, or an object: \`{ "url" }\` (optionally with \`headers\`), \`{ "key" }\`, \`{ "base64" }\`, or \`{ "upload" }\` naming a multipart file. Send files as multipart/form-data with the JSON body in an \`options\` field, or POST a PDF as the raw body with the JSON body URL-encoded in \`?options=\`.
 
-**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed \`url\` that works without the API key until \`expiresAt\`. \`output.return: "pdf"\` returns the bytes instead. The API's own result links can be passed back in as sources.
+**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed \`url\` that works without the API key until \`expiresAt\`. Send \`Accept: application/pdf\` to get the bytes instead (with \`X-File-Key\`, \`X-File-Url\` and \`X-Page-Count\` headers); without it, or with \`*/*\`, the response is JSON. The API's own result links can be passed back in as sources.
 
 **Things that trip people up:**
 - Coordinates are PDF points (72 per inch) from the **bottom-left** corner. Add \`"origin": "top-left"\` to measure y down from the top.
@@ -72,11 +72,13 @@ const errors = {
 
 const pdfReply = {
   "200": {
-    description: 'The PDF: a PdfResult (JSON), or the bytes with output.return "pdf".',
+    description:
+      "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). Errors are always JSON.",
     headers: {
-      "X-Page-Count": { description: 'With output.return "pdf": number of pages.', schema: { type: "integer" } },
-      "X-File-Key": { description: 'With output.return "pdf" and storing: the R2 key.', schema: { type: "string" } },
-      "X-File-Url": { description: 'With output.return "pdf" and storing: the signed download link.', schema: { type: "string" } },
+      "X-Page-Count": { description: "With the PDF bytes: number of pages.", schema: { type: "integer" } },
+      "X-File-Key": { description: "With the PDF bytes, when stored: the R2 key.", schema: { type: "string" } },
+      "X-File-Url": { description: "With the PDF bytes, when stored: the signed download link.", schema: { type: "string" } },
+      Vary: { description: "Accept: the format depends on the Accept header.", schema: { type: "string" } },
     },
     content: { ...json("PdfResult"), "application/pdf": { schema: binary } },
   },
@@ -159,7 +161,7 @@ function components() {
 }
 
 const download = (method: "get" | "head") => ({
-  operationId: method === "get" ? "downloadFile" : "checkFile",
+  operationId: method === "get" ? "download" : "checkFile",
   tags: ["Files"],
   summary: method === "get" ? "Download a stored result" : "Check a stored result without downloading it",
   description: "Use the signed `url` from a response (no API key needed until it expires), or send the API key with just the path.",
@@ -239,7 +241,7 @@ export function openApiDocument() {
       },
       "/files/{key}": { get: download("get"), head: download("head") },
       "/pdf/info": post({
-        operationId: "getInfo",
+        operationId: "info",
         tag: "Inspect",
         summary: "Pages, boxes, metadata, form fields, layers, viewer preferences, attachments",
         description:
@@ -254,7 +256,7 @@ export function openApiDocument() {
         rawPdf: true,
       }),
       "/pdf/text": post({
-        operationId: "getText",
+        operationId: "text",
         tag: "Inspect",
         summary: "Text per page",
         description: 'Extracts the text of each page, in drawing order. Set "items": true to also get each run\'s position, size and font. Scanned pages contain no text: there is no OCR.',
@@ -273,7 +275,7 @@ export function openApiDocument() {
         rawPdf: true,
       }),
       "/pdf/scripts": post({
-        operationId: "getScripts",
+        operationId: "scripts",
         tag: "Inspect",
         summary: "Document, form field, page and XFA JavaScript",
         description: "Lists the JavaScript in a PDF: document-level scripts, form field actions, page open/close actions and XFA scripts. Use it to find the field and event names that setFieldScript and setXFAJavaScript need.",
@@ -282,7 +284,7 @@ export function openApiDocument() {
         rawPdf: true,
       }),
       "/pdf/create": post({
-        operationId: "createPdf",
+        operationId: "create",
         tag: "Build",
         summary: "Make a new PDF",
         description: "Makes a new PDF from blank pages and an operations list: text, images, shapes, other PDFs' pages, form fields, metadata, encryption.",
@@ -291,7 +293,7 @@ export function openApiDocument() {
         rawPdf: false,
       }),
       "/pdf/edit": post({
-        operationId: "editPdf",
+        operationId: "edit",
         tag: "Build",
         summary: "Run operations on a PDF",
         description:
@@ -301,7 +303,7 @@ export function openApiDocument() {
         rawPdf: true,
       }),
       "/pdf/merge": post({
-        operationId: "mergePdfs",
+        operationId: "merge",
         tag: "Build",
         summary: "Join PDFs and images, then run operations",
         description:
@@ -311,7 +313,7 @@ export function openApiDocument() {
         rawPdf: false,
       }),
       "/pdf/split": post({
-        operationId: "splitPdf",
+        operationId: "split",
         tag: "Build",
         summary: "Split a PDF into parts saved in R2",
         description: 'Splits a PDF into parts, every N pages ("every") or one per entry in "ranges", saves each to R2 and returns a signed link for each.',

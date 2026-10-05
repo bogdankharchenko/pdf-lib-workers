@@ -1,5 +1,6 @@
 import { PDFDocument, breakTextIntoLines } from "@cantoo/pdf-lib";
 import { Hono, type Context } from "hono";
+import { accepts } from "hono/accepts";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import type { Env } from "./env";
@@ -113,7 +114,16 @@ async function readRequest(c: C): Promise<{ body: Record<string, unknown>; uploa
   return { body, uploads };
 }
 
-/** Saves `doc` (or appends to it, for incremental edits) and replies per `output`. */
+/**
+ * Whether the client asked for the PDF itself. JSON wins unless the Accept
+ * header ranks application/pdf higher; at equal quality the first listed wins.
+ * No header, "*\/*" and browsers' Accept headers all get JSON.
+ */
+function wantsPdf(c: C): boolean {
+  return accepts(c, { header: "Accept", supports: ["application/json", "application/pdf"], default: "application/json" }) === "application/pdf";
+}
+
+/** Saves `doc` (or appends to it, for incremental edits) and replies as JSON or PDF bytes, per the Accept header. */
 async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { incremental?: boolean } = {}) {
   const bytes = opts.incremental ? await doc.commit({ useObjectStreams: output.useObjectStreams }) : await doc.save({ useObjectStreams: output.useObjectStreams });
   const filename = output.filename ?? "document.pdf";
@@ -125,8 +135,9 @@ async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { increment
     await c.env.PDF_BUCKET.put(key, bytes, { httpMetadata: { contentType: "application/pdf", contentDisposition: disposition } });
     link = await signedUrl(c.env, new URL(c.req.url).origin, key, output.linkTtl);
   }
-  if (output.return === "pdf") {
-    const headers = new Headers({ "content-type": "application/pdf", "content-disposition": disposition, "x-page-count": String(doc.getPageCount()) });
+  c.header("Vary", "Accept");
+  if (wantsPdf(c)) {
+    const headers = new Headers({ "content-type": "application/pdf", "content-disposition": disposition, "x-page-count": String(doc.getPageCount()), vary: "Accept" });
     if (key && link) {
       headers.set("x-file-key", key);
       headers.set("x-file-url", link.url);
