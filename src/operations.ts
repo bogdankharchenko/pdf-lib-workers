@@ -16,7 +16,7 @@ import {
 import { z } from "zod";
 import { badRequest } from "./errors";
 import { resolvePages } from "./pages";
-import { PageSpec, PdfSource, Source } from "./schemas";
+import { FileSource, PageSpec, PdfSource, Source } from "./schemas";
 import { type Ctx, loadPdf, readSource } from "./sources";
 
 const Color = z.string().regex(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i, "Color must be hex, e.g. #ff0000");
@@ -26,7 +26,7 @@ export const PageSize = z.union([
   z.tuple([z.number().positive(), z.number().positive()]),
 ]);
 /** A standard PDF font name (e.g. "Helvetica-Bold") or a TTF/OTF font file. */
-const Font = z.union([z.enum(Object.values(StandardFonts) as [string, ...string[]]), Source]);
+const Font = z.union([z.enum(Object.values(StandardFonts) as [string, ...string[]]), FileSource]);
 /** "bottom-left" is native PDF coordinates; "top-left" measures y down from the top edge. */
 const Origin = z.enum(["bottom-left", "top-left"]).default("bottom-left");
 const Point = z.object({ x: z.number(), y: z.number() });

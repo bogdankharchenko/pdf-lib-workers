@@ -7,9 +7,9 @@ import { HttpError, badRequest } from "./errors";
 import { documentInfo, extractText } from "./inspect";
 import { Editor, Operation, Operations, PageSize, pageSize } from "./operations";
 import { resolvePages } from "./pages";
-import { Output, PageSpec, PdfSource, R2Key } from "./schemas";
+import { MergeSource, Output, PageSpec, PdfSource, R2Key } from "./schemas";
 import { signedUrl, timingSafeEqual, verifySignature } from "./signing";
-import { type Ctx, type Uploads, loadPdf } from "./sources";
+import { type Ctx, type Upload, assignRefs, loadPdf, looksLikePdf, openPdf, readAhead, readSource } from "./sources";
 
 type App = { Bindings: Env };
 type C = Context<App>;
@@ -57,13 +57,15 @@ function fileKey(c: C): string {
 }
 
 /**
- * Reads a JSON body, a multipart form (files plus an "options" JSON field),
- * or a raw PDF body (with options in the ?options= query string).
- * A single upload named "file" becomes the default source.
+ * Reads the request in any of three shapes:
+ * - JSON body.
+ * - Multipart form: files as fields (a field name may repeat), plus an "options" JSON field.
+ * - Raw file body (PDF, sniffed even without a content type), with options in ?options=.
+ * When no source is given, the lone file, the "file" field, or the lone PDF becomes the source.
  */
-async function readRequest(c: C): Promise<{ body: Record<string, unknown>; uploads: Uploads }> {
-  const type = c.req.header("content-type") ?? "";
-  const uploads: Uploads = new Map();
+async function readRequest(c: C): Promise<{ body: Record<string, unknown>; uploads: Upload[] }> {
+  const type = (c.req.header("content-type") ?? "").toLowerCase();
+  const files: Omit<Upload, "ref">[] = [];
   let body: Record<string, unknown> = {};
   const parse = (s: string, what: string) => {
     try {
@@ -76,22 +78,32 @@ async function readRequest(c: C): Promise<{ body: Record<string, unknown>; uploa
   };
   if (type.startsWith("multipart/form-data")) {
     const form = await c.req.formData();
-    for (const [name, value] of form.entries()) {
-      if (typeof value === "string") {
-        if (name === "options") body = parse(value, "options field");
-      } else {
-        uploads.set(name, new Uint8Array(await (value as File).arrayBuffer()));
+    for (const [field, value] of form.entries()) {
+      if (field === "options") {
+        body = parse(typeof value === "string" ? value : await (value as File).text(), "options field");
+      } else if (typeof value !== "string") {
+        const bytes = new Uint8Array(await (value as File).arrayBuffer());
+        // Browsers send an empty, nameless file for an unused file input.
+        if (bytes.length) files.push({ field, filename: (value as File).name || undefined, bytes });
       }
     }
-  } else if (type.startsWith("application/pdf") || type.startsWith("application/octet-stream")) {
-    uploads.set("file", new Uint8Array(await c.req.arrayBuffer()));
-    const opts = c.req.query("options");
-    if (opts) body = parse(opts, "options query parameter");
   } else {
-    const text = await c.req.text();
-    if (text.trim()) body = parse(text, "Body");
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    if (/^(application\/(pdf|x-pdf|octet-stream)|image\/)/.test(type) || looksLikePdf(bytes)) {
+      if (bytes.length) files.push({ field: "file", bytes });
+      const opts = c.req.query("options");
+      if (opts) body = parse(opts, "options query parameter");
+    } else {
+      const text = new TextDecoder().decode(bytes);
+      if (text.trim()) body = parse(text, "Body");
+    }
   }
-  if (body.source === undefined && uploads.has("file")) body.source = { upload: "file" };
+  const uploads = assignRefs(files);
+  if (body.source === undefined && uploads.length) {
+    const pdfs = uploads.filter((u) => looksLikePdf(u.bytes));
+    const pick = uploads.length === 1 ? uploads[0] : (uploads.find((u) => u.ref === "file") ?? (pdfs.length === 1 ? pdfs[0] : undefined));
+    if (pick) body.source = { upload: pick.ref };
+  }
   return { body, uploads };
 }
 
@@ -128,7 +140,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-const ctxOf = (c: C, uploads: Uploads): Ctx => ({ env: c.env, uploads });
+const ctxOf = (c: C, uploads: Upload[]): Ctx => ({ env: c.env, uploads, origin: new URL(c.req.url).origin });
 
 // ---------- index ----------
 
@@ -136,6 +148,8 @@ app.get("/", (c) =>
   c.json({
     name: "pdf-lib-workers",
     auth: "Authorization: Bearer <API_KEY>",
+    sources:
+      'A PDF, image, font or attachment can be a URL string, an R2 key string, { url, headers? }, { key }, { base64 }, or { upload } naming a multipart file by field or file name. Send files as multipart (plus an "options" JSON field) or as a raw body (plus ?options=).',
     endpoints: {
       "POST /files": "Upload a file (raw body or multipart 'file'). ?key= sets the R2 key.",
       "GET /files": "List files. ?prefix= &cursor= &limit=",
@@ -264,22 +278,32 @@ app.post("/pdf/edit", async (c) => {
 
 app.post("/pdf/merge", async (c) => {
   const { body, uploads } = await readRequest(c);
-  if (body.sources === undefined && uploads.size) body.sources = [...uploads.keys()].map((upload) => ({ upload }));
+  // With no sources listed, merge every uploaded PDF in the order sent.
+  if (body.sources === undefined && uploads.length) {
+    const pdfs = uploads.filter((u) => looksLikePdf(u.bytes));
+    body.sources = (pdfs.length ? pdfs : uploads).map((u) => ({ upload: u.ref }));
+  }
   const req = z
     .object({
-      sources: z.array(z.intersection(PdfSource, z.object({ pages: PageSpec.optional() }))).min(1).max(200),
+      sources: z.array(MergeSource).min(1).max(200),
       operations: Operations.default([]),
       output: Output,
     })
     .parse(body);
   const ctx = ctxOf(c, uploads);
+  const read = readAhead(req.sources, (src) => readSource(ctx, src));
   const doc = await PDFDocument.create();
   for (const [i, src] of req.sources.entries()) {
-    const part = await loadPdf(ctx, src).catch((e) => {
-      if (e instanceof HttpError) e.message = `sources[${i}]: ${e.message}`;
-      throw e;
-    });
-    for (const p of await doc.copyPages(part, resolvePages(src.pages, part.getPageCount()))) doc.addPage(p);
+    try {
+      const part = await openPdf(await read(i), src.password);
+      for (const p of await doc.copyPages(part, resolvePages(src.pages, part.getPageCount()))) doc.addPage(p);
+    } catch (e) {
+      if (e instanceof HttpError) {
+        e.message = `sources[${i}]: ${e.message}`;
+        throw e;
+      }
+      throw new HttpError(422, `sources[${i}]: ${(e as Error).message}`);
+    }
   }
   await runOps(c, doc, uploads, req.operations);
   return sendPdf(c, doc, req.output);
@@ -320,7 +344,7 @@ app.post("/pdf/split", async (c) => {
   return c.json({ parts });
 });
 
-async function runOps(c: C, doc: PDFDocument, uploads: Uploads, ops: Operation[]) {
+async function runOps(c: C, doc: PDFDocument, uploads: Upload[], ops: Operation[]) {
   try {
     await new Editor(ctxOf(c, uploads), doc).run(ops);
   } catch (e) {

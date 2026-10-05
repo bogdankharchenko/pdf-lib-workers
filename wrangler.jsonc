@@ -14,7 +14,9 @@
     // Lifetime of signed download links, in seconds.
     "SIGNED_URL_TTL": "3600",
     // Max size of a PDF, image or font fetched from a URL source, in bytes.
-    "MAX_FETCH_BYTES": "52428800"
+    "MAX_FETCH_BYTES": "52428800",
+    // Give up on a URL source after this many milliseconds.
+    "FETCH_TIMEOUT_MS": "30000"
   }
   // Secrets (set with `wrangler secret put`):
   //   API_KEY      - bearer token required on every API call

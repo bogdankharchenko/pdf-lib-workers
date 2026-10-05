@@ -1,6 +1,6 @@
 import { PDFDocument, StandardFonts } from "@cantoo/pdf-lib";
 import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 const worker = (exports as unknown as { default: Fetcher }).default;
 const AUTH = { authorization: "Bearer test-key" };
@@ -27,11 +27,11 @@ function b64(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes));
 }
 
-/** A PDF with `n` pages, each saying "Page i". */
-async function samplePdf(n = 3, size: [number, number] = [612, 792]) {
+/** A PDF with `n` pages, each saying "<label> i". */
+async function samplePdf(n = 3, label = "Page", size: [number, number] = [612, 792]) {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
-  for (let i = 1; i <= n; i++) doc.addPage(size).drawText(`Page ${i}`, { x: 50, y: 700, size: 24, font });
+  for (let i = 1; i <= n; i++) doc.addPage(size).drawText(`${label} ${i}`, { x: 50, y: 700, size: 24, font });
   return doc.save();
 }
 
@@ -168,7 +168,7 @@ describe("pdf", () => {
       post("/pdf/edit", {
         source: { base64: b64(await samplePdf(2)) },
         operations: [
-          { op: "insertPdf", source: { base64: b64(await samplePdf(1, [300, 300])) }, at: 2 },
+          { op: "insertPdf", source: { base64: b64(await samplePdf(1, "Page", [300, 300])) }, at: 2 },
           { op: "drawImage", pages: [1], image: { base64: PNG }, x: 10, y: 10, width: 50 },
         ],
       }),
@@ -270,5 +270,143 @@ describe("pdf", () => {
 
     const notPdf = await post("/pdf/info", { source: { base64: btoa("hello") } });
     expect(notPdf.status).toBe(422);
+  });
+});
+
+describe("inputs: URLs and file data", () => {
+  // Stand-in for the internet: URL -> handler. The Worker shares this isolate, so it sees the mock.
+  const remote = new Map<string, (req: Request) => Response | Promise<Response>>();
+  let fetchSpy: MockInstance;
+  const serve = (url: string, bytes: Uint8Array, init?: ResponseInit) => remote.set(url, () => new Response(bytes, init));
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const req = new Request(input as RequestInfo, init);
+      const handler = remote.get(req.url);
+      return handler ? handler(req) : new Response("not found", { status: 404 });
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    remote.clear();
+  });
+
+  const pageTexts = async (key: string) => (await json(post("/pdf/text", { source: key }))).pages.map((p: any) => p.text);
+
+  it("stitches URLs, R2 keys, base64 and uploads in one call, then watermarks", async () => {
+    serve("https://files.test/a.pdf", await samplePdf(2, "A"));
+    serve("https://files.test/b.pdf", await samplePdf(1, "B"));
+    await json(call("/files?key=tests/c.pdf", { method: "POST", headers: { "content-type": "application/pdf" }, body: await samplePdf(1, "C") }));
+    const fd = new FormData();
+    fd.set("e", new File([await samplePdf(3, "E")], "e.pdf"));
+    fd.set(
+      "options",
+      JSON.stringify({
+        sources: ["https://files.test/a.pdf", { url: "https://files.test/b.pdf" }, "tests/c.pdf", { base64: b64(await samplePdf(1, "D")) }, { upload: "e", pages: "3" }],
+        operations: [{ op: "watermark", text: "COPY" }],
+      }),
+    );
+    const out = await json(call("/pdf/merge", { method: "POST", body: fd }));
+    const texts = await pageTexts(out.key);
+    expect(texts.map((t: string) => t.replace("COPY", "").trim())).toEqual(["A 1", "A 2", "B 1", "C 1", "D 1", "E 3"]);
+    expect(texts.every((t: string) => t.includes("COPY"))).toBe(true);
+  });
+
+  it("stitches every uploaded PDF in order, even when field names repeat", async () => {
+    const png = Uint8Array.from(atob(PNG), (ch) => ch.charCodeAt(0));
+    const form = async () => {
+      const fd = new FormData();
+      fd.append("files", new File([await samplePdf(1, "A")], "a.pdf"));
+      fd.append("files", new File([await samplePdf(1, "B")], "b.pdf"));
+      fd.append("files", new File([await samplePdf(1, "C")], "c.pdf"));
+      fd.append("logo", new File([png], "logo.png", { type: "image/png" }));
+      return fd;
+    };
+    // No options: every PDF, in the order sent; the image is left out.
+    const all = await json(call("/pdf/merge", { method: "POST", body: await form() }));
+    expect(await pageTexts(all.key)).toEqual(["A 1", "B 1", "C 1"]);
+
+    // Pick files by file name or by files[i]; use the image in an operation.
+    const fd = await form();
+    fd.set("options", JSON.stringify({ sources: [{ upload: "c.pdf" }, { upload: "files[0]" }], operations: [{ op: "drawImage", image: { upload: "logo" }, x: 0, y: 0 }] }));
+    const picked = await json(call("/pdf/merge", { method: "POST", body: fd }));
+    expect(await pageTexts(picked.key)).toEqual(["C 1", "A 1"]);
+
+    const ambiguous = await form();
+    ambiguous.set("options", JSON.stringify({ sources: [{ upload: "files" }] }));
+    const res = await call("/pdf/merge", { method: "POST", body: ambiguous });
+    expect(res.status).toBe(400);
+    expect((await res.json<any>()).error).toContain("files[0], files[1], files[2]");
+  });
+
+  it("watermarks a PDF sent as a URL, base64, multipart or raw body", async () => {
+    const pdf = await samplePdf(1);
+    serve("https://files.test/w.pdf", pdf);
+    const operations = [{ op: "watermark", text: "SECRET" }];
+    const opts = encodeURIComponent(JSON.stringify({ operations }));
+    const fd = new FormData();
+    fd.set("file", new File([pdf], "w.pdf"));
+    fd.set("options", JSON.stringify({ operations }));
+    const outs = [
+      await json(post("/pdf/edit", { source: "https://files.test/w.pdf", operations })),
+      await json(post("/pdf/edit", { source: { base64: b64(pdf) }, operations })),
+      await json(post("/pdf/edit", { source: "data:application/pdf;base64," + b64(pdf), operations })),
+      await json(call("/pdf/edit", { method: "POST", body: fd })),
+      await json(call(`/pdf/edit?options=${opts}`, { method: "POST", headers: { "content-type": "application/pdf" }, body: pdf })),
+      // No content type at all: the PDF header is enough.
+      await json(call(`/pdf/edit?options=${opts}`, { method: "POST", body: pdf })),
+    ];
+    for (const out of outs) expect((await pageTexts(out.key))[0]).toContain("SECRET");
+  });
+
+  it("reads its own download links from R2, not the network", async () => {
+    const a = await json(post("/pdf/create", { operations: [{ op: "drawText", text: "First", x: 50, y: 50 }] }));
+    const b = await json(post("/pdf/create", { operations: [{ op: "drawText", text: "Second", x: 50, y: 50 }] }));
+    // A signed link still works if the API is reached through another hostname.
+    const elsewhere = b.url.replace("https://pdf.test", "https://pdf.example.com");
+    const out = await json(post("/pdf/merge", { sources: [a.url, elsewhere] }));
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await pageTexts(out.key)).toEqual(["First", "Second"]);
+  });
+
+  it("sends custom headers with URL requests", async () => {
+    remote.set("https://files.test/private.pdf", async (req) =>
+      req.headers.get("authorization") === "Bearer abc" ? new Response(await samplePdf(2)) : new Response("denied", { status: 401 }),
+    );
+    const denied = await post("/pdf/info", { source: "https://files.test/private.pdf" });
+    expect(denied.status).toBe(502);
+    expect((await denied.json<any>()).error).toContain("HTTP 401");
+    const info = await json(post("/pdf/info", { source: { url: "https://files.test/private.pdf", headers: { authorization: "Bearer abc" } } }));
+    expect(info.pageCount).toBe(2);
+  });
+
+  it("explains bad URL sources", async () => {
+    const pdf = { base64: b64(await samplePdf(1)) };
+    const error = async (res: Response | Promise<Response>) => {
+      const r = await res;
+      return { status: r.status, error: (await r.json<any>()).error as string };
+    };
+
+    remote.set("https://files.test/page.html", () => new Response("<!DOCTYPE html><html>Sign in</html>", { headers: { "content-type": "text/html" } }));
+    const html = await error(post("/pdf/merge", { sources: [pdf, "https://files.test/page.html"] }));
+    expect(html).toEqual({ status: 422, error: 'sources[1]: Not a PDF (starts with "<!DOCTYPE html><html>Sign in</html>")' });
+
+    const missing = await error(post("/pdf/merge", { sources: [pdf, "https://files.test/nope.pdf"] }));
+    expect(missing).toEqual({ status: 502, error: "sources[1]: https://files.test/nope.pdf returned HTTP 404" });
+
+    remote.set("https://files.test/slow.pdf", () => Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError")));
+    expect((await error(post("/pdf/info", { source: "https://files.test/slow.pdf" }))).status).toBe(504);
+
+    serve("https://files.test/huge.pdf", new Uint8Array(1_500_000));
+    expect((await error(post("/pdf/info", { source: "https://files.test/huge.pdf" }))).status).toBe(413);
+
+    const watermarkImage = await error(post("/pdf/edit", { source: pdf, operations: [{ op: "drawImage", image: "https://files.test/nope.png", x: 0, y: 0 }] }));
+    expect(watermarkImage).toEqual({ status: 502, error: "operations[0] (drawImage): https://files.test/nope.png returned HTTP 404" });
+
+    const both = await post("/pdf/info", { source: { url: "https://files.test/a.pdf", key: "a.pdf" } });
+    expect(both.status).toBe(400);
+    expect(JSON.stringify(await both.json())).toContain("exactly one of key, url, base64 or upload");
+
+    expect((await post("/pdf/info", { source: { url: "ftp://files.test/a.pdf" } })).status).toBe(400);
   });
 });

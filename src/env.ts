@@ -4,4 +4,5 @@ export interface Env {
   SIGNING_KEY?: string;
   SIGNED_URL_TTL?: string;
   MAX_FETCH_BYTES?: string;
+  FETCH_TIMEOUT_MS?: string;
 }

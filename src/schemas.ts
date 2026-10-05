@@ -1,19 +1,49 @@
 import { z } from "zod";
 
-/** Where to read bytes from: an R2 object, a URL, inline base64, or a multipart upload field. */
-export const Source = z.union([
-  z.object({ key: z.string().min(1) }),
-  z.object({ url: z.url({ protocol: /^https?$/ }) }),
-  z.object({ base64: z.string().min(1) }),
-  z.object({ upload: z.string().min(1) }),
-]);
-export type Source = z.infer<typeof Source>;
+export const PageSpec = z.union([z.string(), z.array(z.number().int())]);
+
+const KINDS = ["key", "url", "base64", "upload"] as const;
+
+const sourceFields = {
+  /** Object key in the R2 bucket. */
+  key: z.string().min(1).optional(),
+  /** http(s) URL the Worker downloads. */
+  url: z.url({ protocol: /^https?$/ }).optional(),
+  /** Extra request headers for `url`, e.g. Authorization. */
+  headers: z.record(z.string(), z.string()).optional(),
+  /** Inline bytes as base64 or a data: URL. */
+  base64: z.string().min(1).optional(),
+  /** A file sent in the same multipart request, by field name or file name. */
+  upload: z.string().min(1).optional(),
+};
+
+/** Where to read bytes from: an R2 object, a URL, inline base64, or a multipart upload. */
+function source<T extends z.ZodRawShape>(extra: T) {
+  return z
+    .object({ ...sourceFields, ...extra })
+    .refine((s) => KINDS.filter((k) => (s as Record<string, unknown>)[k] !== undefined).length === 1, "Give exactly one of key, url, base64 or upload")
+    .refine((s) => !(s as { headers?: unknown }).headers || (s as { url?: unknown }).url !== undefined, "headers only apply to url sources");
+}
+
+/** Lets a plain string stand in for a source: a URL, a data: URL, or an R2 key. */
+function shorthand(v: unknown) {
+  if (typeof v !== "string") return v;
+  if (/^https?:\/\//i.test(v)) return { url: v };
+  if (/^data:/i.test(v)) return { base64: v };
+  return { key: v };
+}
+
+/** Object form only, for fields where a bare string means something else (fonts). */
+export const FileSource = source({});
+export const Source = z.preprocess(shorthand, FileSource);
+export type Source = z.infer<typeof FileSource>;
 
 /** A PDF source, optionally with the password needed to open it. */
-export const PdfSource = z.intersection(Source, z.object({ password: z.string().optional() }));
+export const PdfSource = z.preprocess(shorthand, source({ password: z.string().optional() }));
 export type PdfSource = z.infer<typeof PdfSource>;
 
-export const PageSpec = z.union([z.string(), z.array(z.number().int())]);
+/** A PDF source for merging, optionally limited to some pages. */
+export const MergeSource = z.preprocess(shorthand, source({ password: z.string().optional(), pages: PageSpec.optional() }));
 
 export const R2Key = z
   .string()

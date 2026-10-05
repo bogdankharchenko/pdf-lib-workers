@@ -6,7 +6,7 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
-        bindings: { API_KEY: "test-key" },
+        bindings: { API_KEY: "test-key", MAX_FETCH_BYTES: "1000000" },
       },
     }),
   ],

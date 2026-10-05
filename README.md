@@ -24,24 +24,29 @@ Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `
 Send `Authorization: Bearer <API_KEY>` (or `X-API-Key: <API_KEY>`) on every call.
 Download links returned by the API carry their own signature (`?expires=…&sig=…`) and work without the key until they expire (default 1 hour, set `SIGNED_URL_TTL`).
 
-## Sources
+## Sources: URLs or file data
 
-Anywhere the API takes a file (PDF, image, font, attachment), pass one of:
+Anywhere the API takes a file (PDF, image, font, attachment), give it one of:
 
 | Shape | Meaning |
 | --- | --- |
-| `{ "key": "uploads/a.pdf" }` | Object in the R2 bucket |
-| `{ "url": "https://…" }` | Fetched by the Worker (max `MAX_FETCH_BYTES`, default 50 MB) |
-| `{ "base64": "JVBERi0…" }` | Inline bytes (data URLs work too) |
-| `{ "upload": "a" }` | A file field in a multipart request |
+| `"https://…"` or `{ "url": "https://…" }` | The Worker downloads it. Add `"headers": { "authorization": "…" }` for private URLs. |
+| `"uploads/a.pdf"` or `{ "key": "uploads/a.pdf" }` | An object in the R2 bucket |
+| `"data:application/pdf;base64,…"` or `{ "base64": "JVBERi0…" }` | The bytes inline |
+| `{ "upload": "a" }` | A file sent in the same multipart request, by field name or file name |
 
-PDF sources also take `"password"` for encrypted files.
+- PDF sources also take `"password"` for encrypted files; merge sources take `"pages"`.
+- Font fields need the object form, since a bare string there is a font name.
+- URL downloads stop after 30 s (`FETCH_TIMEOUT_MS`) or 50 MB (`MAX_FETCH_BYTES`). Errors name the bad input, e.g. `sources[1]: https://… returned HTTP 404` or `Not a PDF (starts with "<!DOCTYPE html>…")`.
+- Links this API returned are read straight from R2, so outputs can feed later calls.
 
-Requests can be:
+Send file data in any of three ways:
 
-- **JSON** — the normal case.
-- **Multipart** — files as fields, plus an `options` field holding the JSON body. A field named `file` becomes the default `source`; for `/pdf/merge`, all uploaded files become `sources` in order when none are given.
-- **Raw PDF body** (`Content-Type: application/pdf`) — handy for `/pdf/info` and `/pdf/text`. Put the JSON body in `?options=`.
+- **Multipart** — files as fields, plus an `options` field holding the JSON body. Field names may repeat (`files`, `files`, …); refer to those as `files[0]`, `files[1]`, or by file name.
+- **Raw body** — the PDF itself (`Content-Type: application/pdf`, or none), with the JSON body URL-encoded in `?options=`.
+- **JSON** — with `base64` sources.
+
+If you leave out `source`, the single uploaded file (or the one in field `file`) is used. If `/pdf/merge` gets no `sources`, it merges every uploaded PDF in the order sent.
 
 ## Output
 
@@ -115,12 +120,27 @@ Run in order, each `{ "op": "<name>", … }`. Errors name the failing step, e.g.
 API=https://pdf-lib-workers.<you>.workers.dev
 H='Authorization: Bearer YOUR_KEY'
 
-# Upload
-curl -s -H "$H" -H 'Content-Type: application/pdf' --data-binary @in.pdf "$API/files?key=uploads/in.pdf"
+# Stitch PDFs from URLs, then watermark the result
+curl -s -H "$H" -H 'Content-Type: application/json' "$API/pdf/merge" -d '{
+  "sources": ["https://example.com/a.pdf", { "url": "https://example.com/b.pdf", "pages": "1-3" }],
+  "operations": [{ "op": "watermark", "text": "COPY" }]
+}'
 
-# Stamp, number pages, lock
+# Stitch local files: every PDF, in the order sent
+curl -s -H "$H" "$API/pdf/merge" -F files=@one.pdf -F files=@two.pdf -F files=@three.pdf
+
+# Mix uploads and URLs, pick pages, get the PDF straight back
+curl -s -H "$H" "$API/pdf/merge" -o out.pdf -F cover=@cover.pdf -F 'options={
+  "sources": [{ "upload": "cover" }, { "url": "https://example.com/report.pdf", "pages": "2-last" }],
+  "output": { "return": "pdf" }
+}'
+
+# Watermark a local file
+curl -s -H "$H" "$API/pdf/edit" -F file=@in.pdf -F 'options={"operations":[{"op":"watermark","text":"DRAFT"}]}'
+
+# Watermark a URL, add page numbers, lock it
 curl -s -H "$H" -H 'Content-Type: application/json' "$API/pdf/edit" -d '{
-  "source": { "key": "uploads/in.pdf" },
+  "source": "https://example.com/in.pdf",
   "operations": [
     { "op": "watermark", "text": "CONFIDENTIAL" },
     { "op": "pageNumbers", "format": "Page {page} of {total}" },
@@ -129,17 +149,14 @@ curl -s -H "$H" -H 'Content-Type: application/json' "$API/pdf/edit" -d '{
   "output": { "key": "outputs/in-stamped.pdf" }
 }'
 
-# Fill a form straight from a URL and get the PDF back
+# Fill a form and flatten it
 curl -s -H "$H" -H 'Content-Type: application/json' "$API/pdf/edit" -o filled.pdf -d '{
-  "source": { "url": "https://example.com/form.pdf" },
+  "source": "https://example.com/form.pdf",
   "operations": [{ "op": "fillForm", "fields": { "name": "Ada", "agree": true }, "flatten": true }],
   "output": { "return": "pdf" }
 }'
 
-# Merge two local files in one request
-curl -s -H "$H" "$API/pdf/merge" -F a=@one.pdf -F b=@two.pdf -F 'options={"sources":[{"upload":"a","pages":"1-2"},{"upload":"b"}]}'
-
-# Text of a local file
+# Text of a local file (raw body)
 curl -s -H "$H" -H 'Content-Type: application/pdf' --data-binary @in.pdf "$API/pdf/text"
 ```
 
