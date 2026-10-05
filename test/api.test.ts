@@ -1,5 +1,5 @@
 import { PDFDocument, StandardFonts } from "@cantoo/pdf-lib";
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { readXmp } from "../src/metadata";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
@@ -220,6 +220,26 @@ describe("pdf", () => {
 
     const res = await post("/pdf/edit", { source: src, operations: [{ op: "fillForm", fields: { nope: "x" } }] });
     expect(res.status).toBe(400);
+  });
+
+  it("fills forms with a custom font for non-Latin text", { timeout: 60000 }, async () => {
+    const src = { base64: b64(await formPdf()) };
+    const fields = { name: "Пётр Иванов" };
+
+    const noFont = await post("/pdf/edit", { source: src, operations: [{ op: "fillForm", fields }] });
+    expect(noFont.status).toBe(400);
+    expect((await noFont.json<any>()).error).toContain('Pass a "font" file');
+
+    const font = { base64: (env as unknown as { TEST_FONT: string }).TEST_FONT };
+    const filled = await json(post("/pdf/edit", { source: src, operations: [{ op: "fillForm", fields, font }] }));
+    expect((await json(post("/pdf/info", { source: filled.key }))).form.fields[0].value).toBe("Пётр Иванов");
+
+    const flat = await json(post("/pdf/edit", { source: src, operations: [{ op: "fillForm", fields, font, flatten: true }] }));
+    const text = await json(post("/pdf/text", { source: flat.key }));
+    expect(text.pages[0].text).toContain("Пётр Иванов");
+
+    const draw = await post("/pdf/edit", { source: src, operations: [{ op: "watermark", text: "Черновик" }] });
+    expect((await draw.json<any>()).error).toContain('cannot draw "Ч"');
   });
 
   it("encrypts, then needs the password to open", async () => {

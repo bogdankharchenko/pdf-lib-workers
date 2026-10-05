@@ -107,13 +107,13 @@ Run in order, each `{ "op": "<name>", … }`. Errors name the failing step, e.g.
 | `drawSvg` | `pages`, `svg` (markup), `x`, `y` (top-left of the SVG), `origin`, `width`, `height` |
 | `watermark` | `pages`, `text` **or** `image` (PNG/JPEG source, e.g. a logo), `position` (center, top-left, top-center, top-right, bottom-…), `margin` (24), `opacity` (0.25), `rotate` (45 for text, 0 for images); text: `size` (60), `font`, `color` (#888888); image: `scale` (0.5 = half the page width) |
 | `pageNumbers` | `pages`, `format` ("{page} / {total}"), `position` (bottom-center), `margin` (24), `size` (10), `font`, `color`, `startAt` (1) |
-| `fillForm` | `fields { name: string \| boolean \| string[] }`, `flatten` (false), `strict` (true: unknown names fail) |
-| `flattenForm` | |
+| `fillForm` | `fields { name: string \| boolean \| string[] }`, `flatten` (false), `strict` (true: unknown names fail), `font` (Helvetica; a TTF/OTF file for non-Latin text) |
+| `flattenForm` | `font` |
 | `setMetadata` | `title`, `author`, `subject`, `keywords[]`, `creator`, `producer`, `language`, `copyright`, `copyrightUrl`, `custom { Key: "value" \| null }` — see below |
 | `attachFile` | `file` (source), `name`, `mimeType`, `description` |
 | `encrypt` | `ownerPassword`, `userPassword`, `algorithm` (AES-256), `permissions { printing, modifying, copying, annotating, fillingForms, contentAccessibility, documentAssembly }` — all allowed unless set to `false` |
 
-`font` is a standard font name (`Helvetica`, `Helvetica-Bold`, `Times-Roman`, `Courier`, …) or a TTF/OTF source. Standard fonts only cover Latin text; use a font file for anything else. Font files are subset, so only used glyphs are embedded.
+`font` is a standard font name (`Helvetica`, `Helvetica-Bold`, `Times-Roman`, `Courier`, …) or a TTF/OTF source. Standard fonts only cover Latin text; use a font file for anything else. If a font lacks a character, the request fails and names the characters, rather than printing `?`. Font files are subset, so only used glyphs are embedded.
 
 ## Metadata: who, where, copyright
 

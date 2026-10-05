@@ -139,8 +139,10 @@ export const Operation = z.discriminatedUnion("op", [
     flatten: z.boolean().default(false),
     /** Fail on unknown field names instead of ignoring them. */
     strict: z.boolean().default(true),
+    /** Font for the filled-in values. Use a TTF/OTF file for non-Latin text. Default: Helvetica. */
+    font: Font.optional(),
   }),
-  z.object({ op: z.literal("flattenForm") }),
+  z.object({ op: z.literal("flattenForm"), font: Font.optional() }),
   z.object({
     op: z.literal("setMetadata"),
     title: z.string().optional(),
@@ -213,6 +215,21 @@ function color(hex: string) {
   return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
 }
 
+const charSets = new WeakMap<PDFFont, Set<number>>();
+
+/**
+ * The library silently draws "?" for characters a font lacks (e.g. Cyrillic in
+ * Helvetica). Refuse instead, so nobody ships a PDF full of question marks.
+ */
+function checkText(font: PDFFont, text: string) {
+  let set = charSets.get(font);
+  if (!set) charSets.set(font, (set = new Set(font.getCharacterSet())));
+  const missing = [...new Set([...text].filter((ch) => !/\s/.test(ch) && !set!.has(ch.codePointAt(0)!)))];
+  if (missing.length) {
+    throw badRequest(`Font ${font.name} cannot draw ${missing.slice(0, 10).map((c) => JSON.stringify(c)).join(", ")}. Pass a "font" file (TTF/OTF) that has these characters.`);
+  }
+}
+
 /** Runs operations in order against one document, caching fonts and images. */
 export class Editor {
   private fonts = new Map<string, PDFFont>();
@@ -264,6 +281,29 @@ export class Editor {
       this.images.set(id, img);
     }
     return img;
+  }
+
+  /**
+   * Redraws form field values in `font` now (rather than at save time, with
+   * Helvetica), so unsupported characters fail here with a useful message.
+   */
+  /** Redraws form field values in `font` (default Helvetica), then optionally flattens. */
+  private async drawFields(spec: z.infer<typeof Font> | undefined, flatten: boolean) {
+    const form = this.doc.getForm();
+    const font = await this.font(spec ?? StandardFonts.Helvetica);
+    for (const f of form.getFields()) {
+      const values = f instanceof PDFTextField ? [f.getText() ?? ""] : f instanceof PDFDropdown || f instanceof PDFOptionList ? f.getSelected() : [];
+      for (const v of values) {
+        try {
+          checkText(font, v);
+        } catch (e) {
+          (e as Error).message = `Field "${f.getName()}": ${(e as Error).message}`;
+          throw e;
+        }
+      }
+    }
+    form.updateFieldAppearances(font);
+    if (flatten) form.flatten({ updateFieldAppearances: false });
   }
 
   private async apply(op: Operation) {
@@ -334,6 +374,7 @@ export class Editor {
       }
       case "drawText": {
         const font = await this.font(op.font);
+        checkText(font, op.text);
         for (const p of this.pages(op.pages)) {
           p.drawText(op.text, {
             x: op.x,
@@ -415,6 +456,7 @@ export class Editor {
         let sizeOn: (page: PDFPage) => [number, number];
         if (op.text) {
           const font = await this.font(op.font);
+          checkText(font, op.text);
           const tw = font.widthOfTextAtSize(op.text, op.size);
           const th = font.heightAtSize(op.size, { descender: false });
           sizeOn = () => [tw, th];
@@ -445,6 +487,7 @@ export class Editor {
       }
       case "pageNumbers": {
         const font = await this.font(op.font);
+        checkText(font, op.format);
         const all = doc.getPages();
         const total = all.length + op.startAt - 1;
         for (const i of resolvePages(op.pages, all.length)) {
@@ -474,11 +517,11 @@ export class Editor {
           else if (field instanceof PDFRadioGroup) field.select(String(value));
           else throw badRequest(`Field "${name}" (${field.constructor.name}) cannot be filled`);
         }
-        if (op.flatten) form.flatten();
+        await this.drawFields(op.font, op.flatten);
         break;
       }
       case "flattenForm":
-        doc.getForm().flatten();
+        await this.drawFields(op.font, true);
         break;
       case "setMetadata":
         if (op.title !== undefined) doc.setTitle(op.title);
