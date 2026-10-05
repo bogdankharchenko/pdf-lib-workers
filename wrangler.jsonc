@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pdf-lib-workers",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // Paid plan: allow up to 5 minutes of CPU per request for large PDFs.
+  "limits": { "cpu_ms": 300000 },
+  "r2_buckets": [
+    { "binding": "PDF_BUCKET", "bucket_name": "pdf-lib-workers" }
+  ],
+  "vars": {
+    // Lifetime of signed download links, in seconds.
+    "SIGNED_URL_TTL": "3600",
+    // Max size of a PDF, image or font fetched from a URL source, in bytes.
+    "MAX_FETCH_BYTES": "52428800"
+  }
+  // Secrets (set with `wrangler secret put`):
+  //   API_KEY      - bearer token required on every API call
+  //   SIGNING_KEY  - optional; HMAC key for signed links (defaults to API_KEY)
+}
