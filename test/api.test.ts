@@ -306,6 +306,12 @@ describe("pdf", () => {
 
     const notPdf = await post("/pdf/info", { source: { base64: btoa("hello") } });
     expect(notPdf.status).toBe(422);
+
+    const badKey = await post("/pdf/create", { operations: [{ op: "setMetadata", custom: { "2026": "x" } }] });
+    expect(badKey.status).toBe(400);
+    expect((await badKey.json<any>()).details).toEqual([
+      { path: "operations.0.custom.2026", message: "Custom keys are letters, digits and _, starting with a letter" },
+    ]);
   });
 });
 

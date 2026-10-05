@@ -44,7 +44,7 @@ app.use("*", async (c, next) => {
 app.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message, details: err.details }, err.status);
   if (err instanceof z.ZodError) {
-    return c.json({ error: "Invalid request", details: err.issues.map((i) => ({ path: i.path.join("."), message: i.message })) }, 400);
+    return c.json({ error: "Invalid request", details: err.issues.map((i) => ({ path: i.path.join("."), message: issueMessage(i) })) }, 400);
   }
   console.error(err);
   return c.json({ error: "Internal error", details: (err as Error).message }, 500);
@@ -53,6 +53,11 @@ app.onError((err, c) => {
 app.notFound((c) => c.json({ error: `No route for ${c.req.method} ${c.req.path}` }, 404));
 
 // ---------- helpers ----------
+
+/** A bad record key's own message (e.g. the key's pattern) rather than zod's generic "Invalid key in record". */
+function issueMessage(issue: z.core.$ZodIssue): string {
+  return issue.code === "invalid_key" ? (issue.issues[0]?.message ?? issue.message) : issue.message;
+}
 
 function fileKey(c: C): string {
   const raw = c.req.path.slice("/files/".length);

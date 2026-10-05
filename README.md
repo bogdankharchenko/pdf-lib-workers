@@ -382,7 +382,7 @@ XFA support targets static government/tax forms; dynamic XFA isn't regenerated.
   "custom": { "MadeFor": "Client X", "Origin": "billing-service", "OrderId": "A-1001" } }
 ```
 
-- `custom` keys are letters, digits and `_`, up to 64 characters. Set a key to `null` to remove it.
+- `custom` keys start with a letter, then letters, digits or `_`, up to 64 characters. Set a key to `null` to remove it.
 - `/pdf/info` returns them under `metadata.copyright`, `metadata.copyrightUrl` and `metadata.custom`.
 - Metadata is invisible on the page. To print "Prepared for Client X" on every page, add a `drawText` or `watermark` step too.
 - Anyone with the file can edit metadata, so treat it as a label, not proof. Encrypting with an owner password stops casual changes.

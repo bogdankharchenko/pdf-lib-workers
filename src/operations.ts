@@ -422,7 +422,7 @@ const variants = [
     custom: z
       .record(z.string().regex(CUSTOM_KEY, "Custom keys are letters, digits and _, starting with a letter"), z.string().nullable())
       .optional()
-      .describe('Your own fields, e.g. { "MadeFor": "Client X" }. Keys are letters, digits and _ (max 64). null removes a field.'),
+      .describe('Your own fields, e.g. { "MadeFor": "Client X" }. Keys start with a letter, then letters, digits or _ (max 64). null removes a field.'),
   }),
   op("attachFile", "Embeds a file inside the PDF.", {
     file: Source,
