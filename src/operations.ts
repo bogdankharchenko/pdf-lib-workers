@@ -33,7 +33,7 @@ import { Alignment, FIELD_EVENTS, applySettings, createField, fieldSettings, set
 import { addImagePage, drawImageInBox, embedImage, imageKind, uprightSize } from "./images";
 import { COPYRIGHT, COPYRIGHT_URL, CUSTOM_KEY, foreignXmp, setInfo, writeXmp } from "./metadata";
 import { resolvePages } from "./pages";
-import { FontSource, ImagePageOptions, PageSize, PageSpec, PdfSource, Source, pageSize } from "./schemas";
+import { FontSource, ImagePageOptions, Layer, PageSize, PageSpec, PdfSource, Source, pageSize } from "./schemas";
 import { type Ctx, loadPdf, openPdf, readSource } from "./sources";
 
 // ---------- shared field types ----------
@@ -263,6 +263,7 @@ const variants = [
     page: z.number().int().default(1).describe("1-based page of the source; negatives count from the end."),
     clip: z
       .object({ left: z.number(), bottom: z.number(), right: z.number(), top: z.number() })
+      .meta({ id: "ClipBox", description: "A rectangle by its edges, in the source page's coordinates." })
       .optional()
       .describe("Part of the source page to use, in its own coordinates. Default: the whole page."),
     x: z.number().default(0),
@@ -343,7 +344,8 @@ const variants = [
           y: z.number(),
           width: z.number().positive(),
           height: z.number().positive(),
-        }),
+        })
+        .meta({ id: "RadioChoice", description: "One radio button: its value and its box." }),
       )
       .optional()
       .describe("Radio groups: one entry per choice, each with its own box."),
@@ -385,7 +387,7 @@ const variants = [
 
   // document
   op("setLayerVisibility", "Shows or hides layers (optional content groups). See /pdf/info for layer names.", {
-    layers: z.array(z.object({ name: z.string(), visible: z.boolean() })).min(1),
+    layers: z.array(Layer).min(1),
   }),
   op("setViewerPreferences", "Controls how viewers open the PDF.", {
     hideToolbar: z.boolean().optional(),
@@ -464,8 +466,8 @@ const variants = [
         contentAccessibility: z.boolean().optional(),
         documentAssembly: z.boolean().optional(),
       })
-      .optional()
-      .describe("What user-password holders may do. Everything is allowed unless set to false."),
+      .meta({ id: "Permissions", description: "What user-password holders may do. Everything is allowed unless set to false." })
+      .optional(),
   }),
 ] as const;
 

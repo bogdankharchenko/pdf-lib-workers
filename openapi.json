@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "pdf-lib-workers",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Edit, merge, split, fill, stamp and inspect PDFs. Results are stored in R2 and returned as signed links.\n\n**Workflow that works well:**\n1. **Inspect first.** `POST /pdf/info` returns pages, sizes, form fields (names, types, choices), layers and attachments.\n2. **Act.** `/pdf/edit`, `/pdf/merge` and `/pdf/create` all take an `operations` list, run in order, so one request can build, stamp and lock a document.\n3. **Verify.** Run `/pdf/info` or `/pdf/text` on the result's `key`.\n\n**Sending files.** Any field typed Source, PdfSource or MergeSource accepts a URL string, an R2 key string, or an object: `{ \"url\" }` (optionally with `headers`), `{ \"key\" }`, `{ \"base64\" }`, or `{ \"upload\" }` naming a multipart file. Send files as multipart/form-data with the JSON body in an `options` field, or POST a PDF as the raw body with the JSON body URL-encoded in `?options=`.\n\n**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed `url` that works without the API key until `expiresAt`. Send `Accept: application/pdf` to get the bytes instead (with `X-File-Key`, `X-File-Url` and `X-Page-Count` headers); without it, or with `*/*`, the response is JSON. The API's own result links can be passed back in as sources.\n\n**Things that trip people up:**\n- Coordinates are PDF points (72 per inch) from the **bottom-left** corner. Add `\"origin\": \"top-left\"` to measure y down from the top.\n- Pages are **1-based**; negative numbers count from the end.\n- Built-in fonts cover Latin text only. Pass a font file for other scripts; text a font cannot draw is rejected (400), never replaced with \"?\".\n- Some sites block requests from Cloudflare Workers (403 from the source URL). Send those files as uploads or base64.\n- Opening a PDF with `password` saves the result **without** a password; add an `encrypt` operation to lock it again.\n- Run `setMetadata` before `convertToPDFA`.\n- Errors are JSON (ErrorResponse) and name the failing input, e.g. `operations[2] (removePages): Page 9 is out of range`.",
     "contact": {
       "name": "pdf-lib-workers on GitHub",
@@ -2421,6 +2421,22 @@
           }
         ]
       },
+      "Layer": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "visible": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "visible"
+        ],
+        "description": "A layer (optional content group) and whether it is shown."
+      },
       "Output": {
         "default": {
           "store": true,
@@ -3518,6 +3534,30 @@
         ],
         "description": "Draws an SVG document (shapes, text, transforms)."
       },
+      "ClipBox": {
+        "type": "object",
+        "properties": {
+          "left": {
+            "type": "number"
+          },
+          "bottom": {
+            "type": "number"
+          },
+          "right": {
+            "type": "number"
+          },
+          "top": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "left",
+          "bottom",
+          "right",
+          "top"
+        ],
+        "description": "A rectangle by its edges, in the source page's coordinates."
+      },
       "DrawPdfPageOperation": {
         "type": "object",
         "properties": {
@@ -3542,27 +3582,7 @@
           },
           "clip": {
             "description": "Part of the source page to use, in its own coordinates. Default: the whole page.",
-            "type": "object",
-            "properties": {
-              "left": {
-                "type": "number"
-              },
-              "bottom": {
-                "type": "number"
-              },
-              "right": {
-                "type": "number"
-              },
-              "top": {
-                "type": "number"
-              }
-            },
-            "required": [
-              "left",
-              "bottom",
-              "right",
-              "top"
-            ]
+            "$ref": "#/components/schemas/ClipBox"
           },
           "x": {
             "default": 0,
@@ -3835,6 +3855,43 @@
         ],
         "description": "Turns all form fields into plain page content."
       },
+      "RadioChoice": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "minLength": 1
+          },
+          "page": {
+            "description": "Default: the field's page.",
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "height": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "value",
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "description": "One radio button: its value and its box."
+      },
       "AddFormFieldOperation": {
         "type": "object",
         "properties": {
@@ -3905,40 +3962,7 @@
             "description": "Radio groups: one entry per choice, each with its own box.",
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "value": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "page": {
-                  "description": "Default: the field's page.",
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                },
-                "x": {
-                  "type": "number"
-                },
-                "y": {
-                  "type": "number"
-                },
-                "width": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                },
-                "height": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                }
-              },
-              "required": [
-                "value",
-                "x",
-                "y",
-                "width",
-                "height"
-              ]
+              "$ref": "#/components/schemas/RadioChoice"
             }
           },
           "label": {
@@ -4322,19 +4346,7 @@
             "minItems": 1,
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "visible": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "name",
-                "visible"
-              ]
+              "$ref": "#/components/schemas/Layer"
             }
           }
         },
@@ -4674,6 +4686,44 @@
         ],
         "description": "Makes a Factur-X / ZUGFeRD e-invoice: attaches your invoice XML and makes the PDF PDF/A-3. The XML is not generated or checked."
       },
+      "Permissions": {
+        "type": "object",
+        "properties": {
+          "printing": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "lowResolution",
+                  "highResolution"
+                ]
+              }
+            ]
+          },
+          "modifying": {
+            "type": "boolean"
+          },
+          "copying": {
+            "type": "boolean"
+          },
+          "annotating": {
+            "type": "boolean"
+          },
+          "fillingForms": {
+            "type": "boolean"
+          },
+          "contentAccessibility": {
+            "type": "boolean"
+          },
+          "documentAssembly": {
+            "type": "boolean"
+          }
+        },
+        "description": "What user-password holders may do. Everything is allowed unless set to false."
+      },
       "EncryptOperation": {
         "type": "object",
         "properties": {
@@ -4705,42 +4755,7 @@
             "type": "boolean"
           },
           "permissions": {
-            "description": "What user-password holders may do. Everything is allowed unless set to false.",
-            "type": "object",
-            "properties": {
-              "printing": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "string",
-                    "enum": [
-                      "lowResolution",
-                      "highResolution"
-                    ]
-                  }
-                ]
-              },
-              "modifying": {
-                "type": "boolean"
-              },
-              "copying": {
-                "type": "boolean"
-              },
-              "annotating": {
-                "type": "boolean"
-              },
-              "fillingForms": {
-                "type": "boolean"
-              },
-              "contentAccessibility": {
-                "type": "boolean"
-              },
-              "documentAssembly": {
-                "type": "boolean"
-              }
-            }
+            "$ref": "#/components/schemas/Permissions"
           }
         },
         "required": [
@@ -5172,6 +5187,30 @@
         ],
         "description": "Splits a PDF into parts saved in R2."
       },
+      "Box": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "description": "A page box in points: lower-left corner (x, y), width and height."
+      },
       "StoredPdf": {
         "type": "object",
         "properties": {
@@ -5245,6 +5284,34 @@
         ],
         "description": "Result of create, edit or merge as JSON (the default; see the Accept header)."
       },
+      "PageBoxes": {
+        "type": "object",
+        "properties": {
+          "mediaBox": {
+            "$ref": "#/components/schemas/Box"
+          },
+          "cropBox": {
+            "$ref": "#/components/schemas/Box"
+          },
+          "bleedBox": {
+            "$ref": "#/components/schemas/Box"
+          },
+          "trimBox": {
+            "$ref": "#/components/schemas/Box"
+          },
+          "artBox": {
+            "$ref": "#/components/schemas/Box"
+          }
+        },
+        "required": [
+          "mediaBox",
+          "cropBox",
+          "bleedBox",
+          "trimBox",
+          "artBox"
+        ],
+        "description": "Media = paper size; crop = visible area; bleed, trim and art are for print production."
+      },
       "PageInfo": {
         "type": "object",
         "properties": {
@@ -5269,131 +5336,7 @@
             "description": "Clockwise rotation: 0, 90, 180 or 270."
           },
           "boxes": {
-            "type": "object",
-            "properties": {
-              "mediaBox": {
-                "type": "object",
-                "properties": {
-                  "x": {
-                    "type": "number"
-                  },
-                  "y": {
-                    "type": "number"
-                  },
-                  "width": {
-                    "type": "number"
-                  },
-                  "height": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "x",
-                  "y",
-                  "width",
-                  "height"
-                ]
-              },
-              "cropBox": {
-                "type": "object",
-                "properties": {
-                  "x": {
-                    "type": "number"
-                  },
-                  "y": {
-                    "type": "number"
-                  },
-                  "width": {
-                    "type": "number"
-                  },
-                  "height": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "x",
-                  "y",
-                  "width",
-                  "height"
-                ]
-              },
-              "bleedBox": {
-                "type": "object",
-                "properties": {
-                  "x": {
-                    "type": "number"
-                  },
-                  "y": {
-                    "type": "number"
-                  },
-                  "width": {
-                    "type": "number"
-                  },
-                  "height": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "x",
-                  "y",
-                  "width",
-                  "height"
-                ]
-              },
-              "trimBox": {
-                "type": "object",
-                "properties": {
-                  "x": {
-                    "type": "number"
-                  },
-                  "y": {
-                    "type": "number"
-                  },
-                  "width": {
-                    "type": "number"
-                  },
-                  "height": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "x",
-                  "y",
-                  "width",
-                  "height"
-                ]
-              },
-              "artBox": {
-                "type": "object",
-                "properties": {
-                  "x": {
-                    "type": "number"
-                  },
-                  "y": {
-                    "type": "number"
-                  },
-                  "width": {
-                    "type": "number"
-                  },
-                  "height": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "x",
-                  "y",
-                  "width",
-                  "height"
-                ]
-              }
-            },
-            "required": [
-              "mediaBox",
-              "cropBox",
-              "bleedBox",
-              "trimBox",
-              "artBox"
-            ]
+            "$ref": "#/components/schemas/PageBoxes"
           }
         },
         "required": [
@@ -5528,6 +5471,26 @@
           "settings"
         ]
       },
+      "PageRange": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "end": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "description": "1-based, inclusive."
+      },
       "ViewerPreferences": {
         "type": "object",
         "properties": {
@@ -5583,26 +5546,9 @@
             ]
           },
           "printPageRange": {
-            "description": "1-based, inclusive.",
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "start": {
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                },
-                "end": {
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              "$ref": "#/components/schemas/PageRange"
             }
           },
           "numCopies": {
@@ -5616,6 +5562,183 @@
           "pageLayout"
         ],
         "description": "pageMode and pageLayout are always present; the rest only when the PDF sets viewer preferences."
+      },
+      "DocumentMetadata": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "author": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keywords": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "creator": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "producer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "creationDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modificationDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "copyright": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "copyrightUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Custom fields set with setMetadata (or by other tools)."
+          }
+        },
+        "required": [
+          "title",
+          "author",
+          "subject",
+          "keywords",
+          "creator",
+          "producer",
+          "language",
+          "creationDate",
+          "modificationDate",
+          "copyright",
+          "copyrightUrl",
+          "custom"
+        ]
+      },
+      "SignatureField": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "acroform",
+              "xfa"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "source"
+        ]
+      },
+      "FormInfo": {
+        "type": "object",
+        "properties": {
+          "hasXFA": {
+            "type": "boolean"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FormField"
+            }
+          },
+          "signatureFields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignatureField"
+            }
+          }
+        },
+        "required": [
+          "hasXFA",
+          "fields",
+          "signatureFields"
+        ]
+      },
+      "AttachmentInfo": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "relationship": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "size",
+          "mimeType",
+          "description",
+          "relationship"
+        ]
       },
       "InfoResponse": {
         "type": "object",
@@ -5636,99 +5759,7 @@
             ]
           },
           "metadata": {
-            "type": "object",
-            "properties": {
-              "title": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "author": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "subject": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "keywords": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "creator": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "producer": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "language": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "creationDate": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "modificationDate": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "copyright": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "copyrightUrl": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "custom": {
-                "type": "object",
-                "propertyNames": {
-                  "type": "string"
-                },
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "description": "Custom fields set with setMetadata (or by other tools)."
-              }
-            },
-            "required": [
-              "title",
-              "author",
-              "subject",
-              "keywords",
-              "creator",
-              "producer",
-              "language",
-              "creationDate",
-              "modificationDate",
-              "copyright",
-              "copyrightUrl",
-              "custom"
-            ]
+            "$ref": "#/components/schemas/DocumentMetadata"
           },
           "pages": {
             "type": "array",
@@ -5737,62 +5768,12 @@
             }
           },
           "form": {
-            "type": "object",
-            "properties": {
-              "hasXFA": {
-                "type": "boolean"
-              },
-              "fields": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/FormField"
-                }
-              },
-              "signatureFields": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "name": {
-                      "type": "string"
-                    },
-                    "source": {
-                      "type": "string",
-                      "enum": [
-                        "acroform",
-                        "xfa"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "name",
-                    "source"
-                  ]
-                }
-              }
-            },
-            "required": [
-              "hasXFA",
-              "fields",
-              "signatureFields"
-            ]
+            "$ref": "#/components/schemas/FormInfo"
           },
           "layers": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "visible": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "name",
-                "visible"
-              ]
+              "$ref": "#/components/schemas/Layer"
             }
           },
           "viewerPreferences": {
@@ -5801,42 +5782,7 @@
           "attachments": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "size": {
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                },
-                "mimeType": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "description": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "relationship": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "name",
-                "size",
-                "mimeType",
-                "description",
-                "relationship"
-              ]
+              "$ref": "#/components/schemas/AttachmentInfo"
             }
           },
           "hasJavaScript": {
@@ -5915,35 +5861,38 @@
           "fontFamily"
         ]
       },
+      "PageText": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "text": {
+            "type": "string",
+            "description": "Text in drawing order, with a new line where the baseline moves. Scanned pages have none (no OCR)."
+          },
+          "items": {
+            "description": "Only with \"items\": true.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TextItem"
+            }
+          }
+        },
+        "required": [
+          "page",
+          "text"
+        ]
+      },
       "TextResponse": {
         "type": "object",
         "properties": {
           "pages": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "page": {
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                },
-                "text": {
-                  "type": "string",
-                  "description": "Text in drawing order, with a new line where the baseline moves. Scanned pages have none (no OCR)."
-                },
-                "items": {
-                  "description": "Only with \"items\": true.",
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TextItem"
-                  }
-                }
-              },
-              "required": [
-                "page",
-                "text"
-              ]
+              "$ref": "#/components/schemas/PageText"
             }
           }
         },
@@ -6153,66 +6102,72 @@
           }
         ]
       },
+      "ExtractedGraphic": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          },
+          "svg": {
+            "type": "string",
+            "description": "Vector graphics, approximated as SVG."
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "width",
+          "height",
+          "svg"
+        ]
+      },
+      "ExtractedPage": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "text": {
+            "description": "With include \"text\".",
+            "type": "string"
+          },
+          "images": {
+            "description": "With include \"images\".",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExtractedImage"
+            }
+          },
+          "graphics": {
+            "description": "With include \"graphics\".",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExtractedGraphic"
+            }
+          }
+        },
+        "required": [
+          "page"
+        ]
+      },
       "ExtractResponse": {
         "type": "object",
         "properties": {
           "pages": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "page": {
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                },
-                "text": {
-                  "description": "With include \"text\".",
-                  "type": "string"
-                },
-                "images": {
-                  "description": "With include \"images\".",
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ExtractedImage"
-                  }
-                },
-                "graphics": {
-                  "description": "With include \"graphics\".",
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "x": {
-                        "type": "number"
-                      },
-                      "y": {
-                        "type": "number"
-                      },
-                      "width": {
-                        "type": "number"
-                      },
-                      "height": {
-                        "type": "number"
-                      },
-                      "svg": {
-                        "type": "string",
-                        "description": "Vector graphics, approximated as SVG."
-                      }
-                    },
-                    "required": [
-                      "x",
-                      "y",
-                      "width",
-                      "height",
-                      "svg"
-                    ]
-                  }
-                }
-              },
-              "required": [
-                "page"
-              ]
+              "$ref": "#/components/schemas/ExtractedPage"
             }
           },
           "attachments": {
@@ -6227,93 +6182,105 @@
           "pages"
         ]
       },
+      "DocumentScript": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "script": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "script"
+        ]
+      },
+      "FieldScript": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "script": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "script",
+          "field"
+        ]
+      },
+      "PageScript": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "script": {
+            "type": "string"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "event",
+          "script",
+          "page"
+        ]
+      },
+      "XfaScript": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "script": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "script",
+          "field"
+        ]
+      },
       "ScriptsResponse": {
         "type": "object",
         "properties": {
           "document": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "script": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "name",
-                "script"
-              ]
+              "$ref": "#/components/schemas/DocumentScript"
             }
           },
           "fields": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "event": {
-                  "type": "string"
-                },
-                "script": {
-                  "type": "string"
-                },
-                "field": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "event",
-                "script",
-                "field"
-              ]
+              "$ref": "#/components/schemas/FieldScript"
             }
           },
           "pages": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "event": {
-                  "type": "string"
-                },
-                "script": {
-                  "type": "string"
-                },
-                "page": {
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                }
-              },
-              "required": [
-                "event",
-                "script",
-                "page"
-              ]
+              "$ref": "#/components/schemas/PageScript"
             }
           },
           "xfa": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "event": {
-                  "type": "string"
-                },
-                "script": {
-                  "type": "string"
-                },
-                "field": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "event",
-                "script",
-                "field"
-              ]
+              "$ref": "#/components/schemas/XfaScript"
             }
           }
         },
@@ -6322,6 +6289,21 @@
           "fields",
           "pages",
           "xfa"
+        ]
+      },
+      "MeasuredLine": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "width": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "text",
+          "width"
         ]
       },
       "MeasureResponse": {
@@ -6342,19 +6324,7 @@
           "lines": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "text": {
-                  "type": "string"
-                },
-                "width": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "text",
-                "width"
-              ]
+              "$ref": "#/components/schemas/MeasuredLine"
             }
           },
           "blockHeight": {
@@ -6374,53 +6344,71 @@
           "blockHeight"
         ]
       },
+      "SplitPart": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "R2 key of the saved file."
+          },
+          "url": {
+            "type": "string",
+            "description": "Signed download link; works without the API key until expiresAt."
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "When the link stops working (ISO 8601)."
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "description": "1-based source pages in this part."
+          },
+          "size": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "key",
+          "url",
+          "expiresAt",
+          "pages",
+          "size"
+        ]
+      },
       "SplitResponse": {
         "type": "object",
         "properties": {
           "parts": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "key": {
-                  "type": "string",
-                  "description": "R2 key of the saved file."
-                },
-                "url": {
-                  "type": "string",
-                  "description": "Signed download link; works without the API key until expiresAt."
-                },
-                "expiresAt": {
-                  "type": "string",
-                  "description": "When the link stops working (ISO 8601)."
-                },
-                "pages": {
-                  "type": "array",
-                  "items": {
-                    "type": "integer",
-                    "minimum": -9007199254740991,
-                    "maximum": 9007199254740991
-                  },
-                  "description": "1-based source pages in this part."
-                },
-                "size": {
-                  "type": "integer",
-                  "minimum": -9007199254740991,
-                  "maximum": 9007199254740991
-                }
-              },
-              "required": [
-                "key",
-                "url",
-                "expiresAt",
-                "pages",
-                "size"
-              ]
+              "$ref": "#/components/schemas/SplitPart"
             }
           }
         },
         "required": [
           "parts"
+        ]
+      },
+      "FieldError": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "message"
         ]
       },
       "ErrorResponse": {
@@ -6436,19 +6424,7 @@
               {
                 "type": "array",
                 "items": {
-                  "type": "object",
-                  "properties": {
-                    "path": {
-                      "type": "string"
-                    },
-                    "message": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "path",
-                    "message"
-                  ]
+                  "$ref": "#/components/schemas/FieldError"
                 }
               },
               {

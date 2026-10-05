@@ -119,6 +119,10 @@ export const MergeSource = withShorthand(
   "A PDF or image to merge: a MergeSourceObject or a shortcut string.",
 );
 
+export const Layer = z
+  .object({ name: z.string(), visible: z.boolean() })
+  .meta({ id: "Layer", description: "A layer (optional content group) and whether it is shown." });
+
 export const R2Key = z
   .string()
   .min(1)
