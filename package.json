@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "openapi": "vitest run test/openapi.test.ts --update",
+    "lint:openapi": "npx --yes @stoplight/spectral-cli@6.17.0 lint openapi.json --fail-severity=warn",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types"
   },

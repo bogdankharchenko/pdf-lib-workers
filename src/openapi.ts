@@ -5,6 +5,8 @@ import { SOURCE_KINDS, SOURCE_OBJECT_IDS } from "./schemas";
 import "./requests";
 import "./replies";
 
+const REPOSITORY = "https://github.com/bogdankharchenko/pdf-lib-workers";
+
 const ref = (id: string) => ({ $ref: `#/components/schemas/${id}` });
 const json = (id: string) => ({ "application/json": { schema: ref(id) } });
 const binary = { type: "string", format: "binary" } as const;
@@ -80,14 +82,26 @@ const pdfReply = {
   },
 };
 
-function post(operationId: string, tag: string, summary: string, requestId: string, reply: object, opts: { rawPdf: boolean }) {
+interface PostRoute {
+  operationId: string;
+  tag: string;
+  summary: string;
+  description: string;
+  request: string;
+  reply: object;
+  /** Accepts a raw PDF body, with the rest of the request in ?options=. */
+  rawPdf: boolean;
+}
+
+function post({ operationId, tag, summary, description, request, reply, rawPdf }: PostRoute) {
   return {
     post: {
       operationId,
       tags: [tag],
       summary,
-      ...(opts.rawPdf ? { parameters: [optionsParam] } : {}),
-      requestBody: body(requestId, opts),
+      description,
+      ...(rawPdf ? { parameters: [optionsParam] } : {}),
+      requestBody: body(request, { rawPdf }),
       responses: { ...reply, ...errors },
     },
   };
@@ -121,9 +135,24 @@ function sourceVariants(schema: JsonSchema): JsonSchema {
   };
 }
 
+/**
+ * zod writes a tuple as `prefixItems` plus `items: false`. That is valid
+ * OpenAPI 3.1, but many tools (Swagger Editor, Spectral) reject a boolean
+ * `items`. `maxItems` already caps the length, so use the element schema when
+ * every element is the same (tools without prefixItems then still see the
+ * right type), and otherwise leave `items` out.
+ */
+function compatibleTuple({ jsonSchema }: { jsonSchema: JsonSchema }) {
+  const { prefixItems, items } = jsonSchema as { prefixItems?: unknown[]; items?: unknown };
+  if (!prefixItems || items !== false) return;
+  const same = prefixItems.every((p) => JSON.stringify(p) === JSON.stringify(prefixItems[0]));
+  if (same) jsonSchema.items = prefixItems[0];
+  else delete jsonSchema.items;
+}
+
 /** Component schemas from zod. Their $schema/$id lines are dropped; OpenAPI supplies the dialect. */
 function components() {
-  const { schemas } = z.toJSONSchema(z.globalRegistry, { io: "input", uri: (id) => `#/components/schemas/${id}` });
+  const { schemas } = z.toJSONSchema(z.globalRegistry, { io: "input", uri: (id) => `#/components/schemas/${id}`, override: compatibleTuple });
   return Object.fromEntries(
     Object.entries(schemas).map(([id, { $schema: _s, $id: _i, ...schema }]) => [id, SOURCE_OBJECT_IDS.has(id) ? sourceVariants(schema as JsonSchema) : schema]),
   );
@@ -165,7 +194,14 @@ const download = (method: "get" | "head") => ({
 export function openApiDocument() {
   return {
     openapi: "3.1.0",
-    info: { title: "pdf-lib-workers", version, description: DESCRIPTION, license: { name: license, identifier: license } },
+    info: {
+      title: "pdf-lib-workers",
+      version,
+      description: DESCRIPTION,
+      contact: { name: "pdf-lib-workers on GitHub", url: REPOSITORY },
+      license: { name: license, identifier: license },
+    },
+    externalDocs: { description: "README: examples, limits and setup", url: `${REPOSITORY}#readme` },
     servers: [
       {
         url: "https://pdf-lib-workers.{subdomain}.workers.dev",
@@ -186,6 +222,7 @@ export function openApiDocument() {
           operationId: "index",
           tags: ["Utilities"],
           summary: "List endpoints and operations",
+          description: "A short overview of the endpoints and operation names, with a link to this document. No API key needed.",
           security: [{}],
           responses: { "200": { description: "A short overview, with a link to this document.", content: { "application/json": { schema: { type: "object" } } } } },
         },
@@ -195,25 +232,102 @@ export function openApiDocument() {
           operationId: "openapi",
           tags: ["Utilities"],
           summary: "This document",
+          description: "This OpenAPI 3.1 document, with servers set to the deployment it was fetched from. No API key needed.",
           security: [{}],
           responses: { "200": { description: "The OpenAPI document.", content: { "application/json": { schema: { type: "object" } } } } },
         },
       },
       "/files/{key}": { get: download("get"), head: download("head") },
-      "/pdf/info": post("getInfo", "Inspect", "Pages, boxes, metadata, form fields, layers, viewer preferences, attachments", "InfoRequest", {
-        "200": {
-          description: "An InfoResponse, or a LockedInfoResponse for an encrypted PDF sent without its password.",
-          content: { "application/json": { schema: { oneOf: [ref("InfoResponse"), ref("LockedInfoResponse")] } } },
+      "/pdf/info": post({
+        operationId: "getInfo",
+        tag: "Inspect",
+        summary: "Pages, boxes, metadata, form fields, layers, viewer preferences, attachments",
+        description:
+          "Reads everything about a PDF except its content: pages and their boxes, metadata (including copyright and custom fields), form fields with their types, choices and settings, layers, viewer preferences and attachments. Call it before editing to learn field names and page sizes. An encrypted PDF sent without its password returns a LockedInfoResponse, not an error.",
+        request: "InfoRequest",
+        reply: {
+          "200": {
+            description: "An InfoResponse, or a LockedInfoResponse for an encrypted PDF sent without its password.",
+            content: { "application/json": { schema: { oneOf: [ref("InfoResponse"), ref("LockedInfoResponse")] } } },
+          },
         },
-      }, { rawPdf: true }),
-      "/pdf/text": post("getText", "Inspect", "Text per page", "TextRequest", ok("TextResponse"), { rawPdf: true }),
-      "/pdf/extract": post("extract", "Inspect", "Images, vector graphics, text and attachments", "ExtractRequest", ok("ExtractResponse"), { rawPdf: true }),
-      "/pdf/scripts": post("getScripts", "Inspect", "Document, form field, page and XFA JavaScript", "ScriptsRequest", ok("ScriptsResponse"), { rawPdf: true }),
-      "/pdf/create": post("createPdf", "Build", "Make a new PDF", "CreateRequest", pdfReply, { rawPdf: false }),
-      "/pdf/edit": post("editPdf", "Build", "Run operations on a PDF", "EditRequest", pdfReply, { rawPdf: true }),
-      "/pdf/merge": post("mergePdfs", "Build", "Join PDFs and images, then run operations", "MergeRequest", pdfReply, { rawPdf: false }),
-      "/pdf/split": post("splitPdf", "Build", "Split a PDF into parts saved in R2", "SplitRequest", ok("SplitResponse"), { rawPdf: true }),
-      "/text/measure": post("measureText", "Utilities", "Width, height and line breaks of text in a font", "MeasureRequest", ok("MeasureResponse"), { rawPdf: false }),
+        rawPdf: true,
+      }),
+      "/pdf/text": post({
+        operationId: "getText",
+        tag: "Inspect",
+        summary: "Text per page",
+        description: 'Extracts the text of each page, in drawing order. Set "items": true to also get each run\'s position, size and font. Scanned pages contain no text: there is no OCR.',
+        request: "TextRequest",
+        reply: ok("TextResponse"),
+        rawPdf: true,
+      }),
+      "/pdf/extract": post({
+        operationId: "extract",
+        tag: "Inspect",
+        summary: "Images, vector graphics, text and attachments",
+        description:
+          'Pulls images (as PNG or JPEG), vector graphics (approximated as SVG), text and embedded files out of a PDF; choose which with "include". Files are saved to R2 and returned as signed links, or returned as base64 with "store": false.',
+        request: "ExtractRequest",
+        reply: ok("ExtractResponse"),
+        rawPdf: true,
+      }),
+      "/pdf/scripts": post({
+        operationId: "getScripts",
+        tag: "Inspect",
+        summary: "Document, form field, page and XFA JavaScript",
+        description: "Lists the JavaScript in a PDF: document-level scripts, form field actions, page open/close actions and XFA scripts. Use it to find the field and event names that setFieldScript and setXFAJavaScript need.",
+        request: "ScriptsRequest",
+        reply: ok("ScriptsResponse"),
+        rawPdf: true,
+      }),
+      "/pdf/create": post({
+        operationId: "createPdf",
+        tag: "Build",
+        summary: "Make a new PDF",
+        description: "Makes a new PDF from blank pages and an operations list: text, images, shapes, other PDFs' pages, form fields, metadata, encryption.",
+        request: "CreateRequest",
+        reply: pdfReply,
+        rawPdf: false,
+      }),
+      "/pdf/edit": post({
+        operationId: "editPdf",
+        tag: "Build",
+        summary: "Run operations on a PDF",
+        description:
+          'Runs an operations list on one PDF. With "incremental": true the original bytes are kept and the changes appended, so existing digital signatures stay valid. A PDF opened with its password is saved without one unless the operations include encrypt.',
+        request: "EditRequest",
+        reply: pdfReply,
+        rawPdf: true,
+      }),
+      "/pdf/merge": post({
+        operationId: "mergePdfs",
+        tag: "Build",
+        summary: "Join PDFs and images, then run operations",
+        description:
+          'Joins PDFs (whole or chosen pages) and PNG/JPEG images in order, each image becoming one page, then runs an optional operations list on the result. In a multipart request "sources" may be left out: every uploaded PDF and image is merged in the order sent, except files the operations use, such as a watermark logo.',
+        request: "MergeRequest",
+        reply: pdfReply,
+        rawPdf: false,
+      }),
+      "/pdf/split": post({
+        operationId: "splitPdf",
+        tag: "Build",
+        summary: "Split a PDF into parts saved in R2",
+        description: 'Splits a PDF into parts, every N pages ("every") or one per entry in "ranges", saves each to R2 and returns a signed link for each.',
+        request: "SplitRequest",
+        reply: ok("SplitResponse"),
+        rawPdf: true,
+      }),
+      "/text/measure": post({
+        operationId: "measureText",
+        tag: "Utilities",
+        summary: "Width, height and line breaks of text in a font",
+        description: "Measures text in a built-in font or a font file, optionally wrapped at a width, so text can be laid out before it is drawn. No PDF needed.",
+        request: "MeasureRequest",
+        reply: ok("MeasureResponse"),
+        rawPdf: false,
+      }),
     },
     components: {
       schemas: components(),

@@ -56,6 +56,7 @@ Write clients from the OpenAPI 3.1 spec rather than from this page. It covers ev
 
 - **Where:** `GET /openapi.json` on a deployment (no API key; `servers` lists that deployment's address), or [`openapi.json`](openapi.json) in this repo.
 - **Always current:** it's generated from the same schemas that validate requests, and the tests fail if the committed file is out of date or if any response has a field the spec doesn't list.
+- **Valid:** CI lints it with Spectral; it also passes Redocly and Swagger Editor's validator.
 - **TypeScript types:** `npx openapi-typescript https://<your-deployment>/openapi.json --default-non-nullable false -o pdf-api.d.ts`. Without that flag, fields that have defaults come out as required.
 - **Names to look for:** each request is `<Name>Request` (e.g. `MergeRequest`) and each operation is `<Op>Operation` (e.g. `WatermarkOperation`). `Operation` is a union keyed on `op`. Sources are `Source`, `PdfSource` or `MergeSource`: a shortcut string, or an object with exactly one of `key`, `url`, `base64` or `upload`.
 
@@ -93,7 +94,7 @@ The two expiry rules cover where the API saves results by default: `outputs/` (`
 
 Optional: `npx wrangler secret put SIGNING_KEY` — a separate key for download links (defaults to `API_KEY`). Changing it voids all links already handed out.
 
-Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `npm test`. After changing a schema or route, run `npm run openapi` to regenerate `openapi.json`; `npm test` fails until you do. CI runs the typecheck, the tests and a build of the Worker on every pull request and push to `main`.
+Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `npm test`. After changing a schema or route, run `npm run openapi` to regenerate `openapi.json`; `npm test` fails until you do. `npm run lint:openapi` checks the spec with Spectral. CI runs the typecheck, the tests, the spec check and a build of the Worker on every pull request and push to `main`.
 
 ## Auth and access
 

@@ -4,10 +4,18 @@
     "title": "pdf-lib-workers",
     "version": "0.1.0",
     "description": "Edit, merge, split, fill, stamp and inspect PDFs. Results are stored in R2 and returned as signed links.\n\n**Workflow that works well:**\n1. **Inspect first.** `POST /pdf/info` returns pages, sizes, form fields (names, types, choices), layers and attachments.\n2. **Act.** `/pdf/edit`, `/pdf/merge` and `/pdf/create` all take an `operations` list, run in order, so one request can build, stamp and lock a document.\n3. **Verify.** Run `/pdf/info` or `/pdf/text` on the result's `key`.\n\n**Sending files.** Any field typed Source, PdfSource or MergeSource accepts a URL string, an R2 key string, or an object: `{ \"url\" }` (optionally with `headers`), `{ \"key\" }`, `{ \"base64\" }`, or `{ \"upload\" }` naming a multipart file. Send files as multipart/form-data with the JSON body in an `options` field, or POST a PDF as the raw body with the JSON body URL-encoded in `?options=`.\n\n**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed `url` that works without the API key until `expiresAt`. `output.return: \"pdf\"` returns the bytes instead. The API's own result links can be passed back in as sources.\n\n**Things that trip people up:**\n- Coordinates are PDF points (72 per inch) from the **bottom-left** corner. Add `\"origin\": \"top-left\"` to measure y down from the top.\n- Pages are **1-based**; negative numbers count from the end.\n- Built-in fonts cover Latin text only. Pass a font file for other scripts; text a font cannot draw is rejected (400), never replaced with \"?\".\n- Some sites block requests from Cloudflare Workers (403 from the source URL). Send those files as uploads or base64.\n- Opening a PDF with `password` saves the result **without** a password; add an `encrypt` operation to lock it again.\n- Run `setMetadata` before `convertToPDFA`.\n- Errors are JSON (ErrorResponse) and name the failing input, e.g. `operations[2] (removePages): Page 9 is out of range`.",
+    "contact": {
+      "name": "pdf-lib-workers on GitHub",
+      "url": "https://github.com/bogdankharchenko/pdf-lib-workers"
+    },
     "license": {
       "name": "MIT",
       "identifier": "MIT"
     }
+  },
+  "externalDocs": {
+    "description": "README: examples, limits and setup",
+    "url": "https://github.com/bogdankharchenko/pdf-lib-workers#readme"
   },
   "servers": [
     {
@@ -55,6 +63,7 @@
           "Utilities"
         ],
         "summary": "List endpoints and operations",
+        "description": "A short overview of the endpoints and operation names, with a link to this document. No API key needed.",
         "security": [
           {}
         ],
@@ -79,6 +88,7 @@
           "Utilities"
         ],
         "summary": "This document",
+        "description": "This OpenAPI 3.1 document, with servers set to the deployment it was fetched from. No API key needed.",
         "security": [
           {}
         ],
@@ -333,6 +343,7 @@
           "Inspect"
         ],
         "summary": "Pages, boxes, metadata, form fields, layers, viewer preferences, attachments",
+        "description": "Reads everything about a PDF except its content: pages and their boxes, metadata (including copyright and custom fields), form fields with their types, choices and settings, layers, viewer preferences and attachments. Call it before editing to learn field names and page sizes. An encrypted PDF sent without its password returns a LockedInfoResponse, not an error.",
         "parameters": [
           {
             "name": "options",
@@ -490,6 +501,7 @@
           "Inspect"
         ],
         "summary": "Text per page",
+        "description": "Extracts the text of each page, in drawing order. Set \"items\": true to also get each run's position, size and font. Scanned pages contain no text: there is no OCR.",
         "parameters": [
           {
             "name": "options",
@@ -640,6 +652,7 @@
           "Inspect"
         ],
         "summary": "Images, vector graphics, text and attachments",
+        "description": "Pulls images (as PNG or JPEG), vector graphics (approximated as SVG), text and embedded files out of a PDF; choose which with \"include\". Files are saved to R2 and returned as signed links, or returned as base64 with \"store\": false.",
         "parameters": [
           {
             "name": "options",
@@ -790,6 +803,7 @@
           "Inspect"
         ],
         "summary": "Document, form field, page and XFA JavaScript",
+        "description": "Lists the JavaScript in a PDF: document-level scripts, form field actions, page open/close actions and XFA scripts. Use it to find the field and event names that setFieldScript and setXFAJavaScript need.",
         "parameters": [
           {
             "name": "options",
@@ -940,6 +954,7 @@
           "Build"
         ],
         "summary": "Make a new PDF",
+        "description": "Makes a new PDF from blank pages and an operations list: text, images, shapes, other PDFs' pages, form fields, metadata, encryption.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1098,6 +1113,7 @@
           "Build"
         ],
         "summary": "Run operations on a PDF",
+        "description": "Runs an operations list on one PDF. With \"incremental\": true the original bytes are kept and the changes appended, so existing digital signatures stay valid. A PDF opened with its password is saved without one unless the operations include encrypt.",
         "parameters": [
           {
             "name": "options",
@@ -1274,6 +1290,7 @@
           "Build"
         ],
         "summary": "Join PDFs and images, then run operations",
+        "description": "Joins PDFs (whole or chosen pages) and PNG/JPEG images in order, each image becoming one page, then runs an optional operations list on the result. In a multipart request \"sources\" may be left out: every uploaded PDF and image is merged in the order sent, except files the operations use, such as a watermark logo.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1432,6 +1449,7 @@
           "Build"
         ],
         "summary": "Split a PDF into parts saved in R2",
+        "description": "Splits a PDF into parts, every N pages (\"every\") or one per entry in \"ranges\", saves each to R2 and returns a signed link for each.",
         "parameters": [
           {
             "name": "options",
@@ -1582,6 +1600,7 @@
           "Utilities"
         ],
         "summary": "Width, height and line breaks of text in a font",
+        "description": "Measures text in a built-in font or a font file, optionally wrapped at a width, so text can be laid out before it is drawn. No PDF needed.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1788,7 +1807,10 @@
                 "exclusiveMinimum": 0
               }
             ],
-            "items": false,
+            "items": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
             "minItems": 2,
             "maxItems": 2
           }
@@ -2809,7 +2831,10 @@
                     "exclusiveMinimum": 0
                   }
                 ],
-                "items": false,
+                "items": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
                 "minItems": 2,
                 "maxItems": 2
               }
