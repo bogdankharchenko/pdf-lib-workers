@@ -1,0 +1,36 @@
+src/index.ts
+  s_11a02fa3fb7722::t_8ff314f6378e87 3,117-126,138-140
+README.md
+  s_11a02fa3fb7722::t_9d58e8edadf4b0 48,150-152,155,162,173-177,423-424,451,454
+package.json
+  s_11a02fa3fb7722::t_8ff314f6378e87 3
+test/api.test.ts
+  s_11a02fa3fb7722::t_37f05e9c2432ad 220-224,227,235-274
+  s_11a02fa3fb7722::t_5a500935297701 275
+src/replies.ts
+  s_11a02fa3fb7722::t_8ff314f6378e87 26
+openapi.json
+  s_11a02fa3fb7722::t_37f05e9c2432ad 5-6,111,341,499,801,952,991,994,1000,1006-1012,1117,1174,1177,1183,1189-1195,1300,1339,1342,1348,1354-1360,1465,2429,2445,5246
+src/openapi.ts
+  s_11a02fa3fb7722::t_8ff314f6378e87 23,75-76,78-81,164,244,259,278,287,296,306,316
+src/schemas.ts
+  s_11a02fa3fb7722::t_8ff314f6378e87 135,139-143
+package-lock.json
+  s_11a02fa3fb7722::t_b55abab1c9f4bd 3,9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6826f43276775ff896c9040b7d1a844700901ad4",
+  "prompts": {},
+  "sessions": {
+    "s_11a02fa3fb7722": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "24159d53-2c36-4ac6-a170-c654d0a1d84c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bogdan Kharchenko <scriptor@gmail.com>"
+    }
+  }
+}
