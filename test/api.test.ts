@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts } from "@cantoo/pdf-lib";
 import { exports } from "cloudflare:workers";
+import { readXmp } from "../src/metadata";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 const worker = (exports as unknown as { default: Fetcher }).default;
@@ -26,6 +27,8 @@ async function download(url: string) {
 function b64(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes));
 }
+
+const pageTexts = async (key: string) => (await json(post("/pdf/text", { source: key }))).pages.map((p: any) => p.text);
 
 /** A PDF with `n` pages, each saying "<label> i". */
 async function samplePdf(n = 3, label = "Page", size: [number, number] = [612, 792]) {
@@ -291,7 +294,6 @@ describe("inputs: URLs and file data", () => {
     remote.clear();
   });
 
-  const pageTexts = async (key: string) => (await json(post("/pdf/text", { source: key }))).pages.map((p: any) => p.text);
 
   it("stitches URLs, R2 keys, base64 and uploads in one call, then watermarks", async () => {
     serve("https://files.test/a.pdf", await samplePdf(2, "A"));
@@ -322,9 +324,9 @@ describe("inputs: URLs and file data", () => {
       fd.append("logo", new File([png], "logo.png", { type: "image/png" }));
       return fd;
     };
-    // No options: every PDF, in the order sent; the image is left out.
+    // No options: every PDF and image, in the order sent.
     const all = await json(call("/pdf/merge", { method: "POST", body: await form() }));
-    expect(await pageTexts(all.key)).toEqual(["A 1", "B 1", "C 1"]);
+    expect(await pageTexts(all.key)).toEqual(["A 1", "B 1", "C 1", ""]);
 
     // Pick files by file name or by files[i]; use the image in an operation.
     const fd = await form();
@@ -408,5 +410,136 @@ describe("inputs: URLs and file data", () => {
     expect(JSON.stringify(await both.json())).toContain("exactly one of key, url, base64 or upload");
 
     expect((await post("/pdf/info", { source: { url: "ftp://files.test/a.pdf" } })).status).toBe(400);
+  });
+});
+
+/** A JPEG header only (enough to embed): w×h pixels, optional EXIF orientation. */
+function fakeJpeg(w: number, h: number, orientation?: number) {
+  const bytes = [0xff, 0xd8];
+  if (orientation) {
+    // APP1 "Exif\0\0", big-endian TIFF, IFD0 with one entry: 0x0112 SHORT 1 = orientation
+    const tiff = [0x4d, 0x4d, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, orientation, 0, 0, 0, 0, 0, 0];
+    const body = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff];
+    bytes.push(0xff, 0xe1, (body.length + 2) >> 8, (body.length + 2) & 255, ...body);
+  }
+  bytes.push(0xff, 0xc0, 0, 17, 8, h >> 8, h & 255, w >> 8, w & 255, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1);
+  bytes.push(0xff, 0xd9);
+  return new Uint8Array(bytes);
+}
+
+/** Where images were painted on each page, from the PDF itself. */
+async function imagesOn(key: string) {
+  const doc = await PDFDocument.load(await download((await json(post("/files/sign", { key }))).url));
+  return doc.getPages().map((p) =>
+    p.extractContents().flatMap((a) => (a.kind === "image" ? [{ x: Math.round(a.x) + 0, y: Math.round(a.y) + 0, w: Math.round(a.drawWidth), h: Math.round(a.drawHeight) }] : [])),
+  );
+}
+
+describe("images, logo watermarks, metadata", () => {
+  const png = Uint8Array.from(atob(PNG), (ch) => ch.charCodeAt(0));
+
+  it("stitches images in as pages, fitted and upright", async () => {
+    const out = await json(
+      post("/pdf/merge", {
+        sources: [
+          { base64: b64(await samplePdf(1)) },
+          { base64: b64(fakeJpeg(400, 200)) }, // wide: landscape A4
+          { base64: b64(fakeJpeg(400, 200, 6)) }, // phone photo turned 90°: portrait A4
+          { base64: b64(png), size: "Letter", margin: 36 },
+          { base64: b64(fakeJpeg(300, 100)), size: "image", margin: 10 },
+        ],
+      }),
+    );
+    const info = await json(post("/pdf/info", { source: out.key }));
+    expect(info.pages.map((p: any) => [Math.round(p.width), Math.round(p.height)])).toEqual([
+      [612, 792],
+      [842, 595],
+      [595, 842],
+      [612, 792],
+      [320, 120],
+    ]);
+    const imgs = await imagesOn(out.key);
+    expect(imgs[1]).toEqual([{ x: 0, y: 87, w: 842, h: 421 }]);
+    expect(imgs[3]).toEqual([{ x: 36, y: 126, w: 540, h: 540 }]);
+    expect(imgs[4]).toEqual([{ x: 10, y: 10, w: 300, h: 100 }]);
+  });
+
+  it("inserts an image page into an existing PDF", async () => {
+    const out = await json(post("/pdf/edit", { source: { base64: b64(await samplePdf(2)) }, operations: [{ op: "insertPdf", source: { base64: b64(png) }, at: 2 }] }));
+    expect(await pageTexts(out.key)).toEqual(["Page 1", "", "Page 2"]);
+  });
+
+  it("watermarks with a logo, centred or in a corner, and skips it when merging uploads", async () => {
+    const fd = new FormData();
+    fd.append("files", new File([await samplePdf(1, "A")], "a.pdf"));
+    fd.append("files", new File([await samplePdf(1, "B")], "b.pdf"));
+    fd.append("logo", new File([png], "logo.png"));
+    fd.set(
+      "options",
+      JSON.stringify({
+        operations: [
+          { op: "watermark", image: { upload: "logo" }, scale: 0.5 },
+          { op: "watermark", image: { upload: "logo" }, scale: 0.1, position: "bottom-right", margin: 20 },
+        ],
+      }),
+    );
+    const out = await json(call("/pdf/merge", { method: "POST", body: fd }));
+    expect(await pageTexts(out.key)).toEqual(["A 1", "B 1"]);
+    expect((await imagesOn(out.key))[0]).toEqual([
+      { x: 153, y: 243, w: 306, h: 306 },
+      { x: 531, y: 20, w: 61, h: 61 },
+    ]);
+    const bad = await post("/pdf/edit", { source: { base64: b64(await samplePdf(1)) }, operations: [{ op: "watermark" }] });
+    expect((await bad.json<any>()).details[0].message).toBe("Give text or image");
+  });
+
+  it("stores copyright and custom fields in Info and XMP", async () => {
+    const out = await json(
+      post("/pdf/edit", {
+        source: { base64: b64(await samplePdf(1)) },
+        operations: [
+          {
+            op: "setMetadata",
+            title: "Q3 report",
+            author: "Acme Inc.",
+            copyright: "© 2026 Acme Inc. All rights reserved.",
+            copyrightUrl: "https://acme.example/licence",
+            custom: { MadeFor: "Client <X>", Origin: "billing-service", OrderId: "A-1001" },
+          },
+          { op: "setMetadata", custom: { OrderId: null } },
+        ],
+      }),
+    );
+    const { metadata } = await json(post("/pdf/info", { source: out.key }));
+    expect(metadata).toMatchObject({
+      title: "Q3 report",
+      author: "Acme Inc.",
+      copyright: "© 2026 Acme Inc. All rights reserved.",
+      copyrightUrl: "https://acme.example/licence",
+      custom: { MadeFor: "Client <X>", Origin: "billing-service" },
+    });
+    const doc = await PDFDocument.load(await download(out.url));
+    const xmp = readXmp(doc)!;
+    expect(xmp).toContain('<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">© 2026 Acme Inc. All rights reserved.</rdf:li></rdf:Alt></dc:rights>');
+    expect(xmp).toContain("<xmpRights:Marked>True</xmpRights:Marked>");
+    expect(xmp).toContain("<pdfx:MadeFor>Client &lt;X&gt;</pdfx:MadeFor>");
+    expect(xmp).not.toContain("OrderId");
+
+    const bad = await post("/pdf/edit", { source: { base64: b64(await samplePdf(1)) }, operations: [{ op: "setMetadata", custom: { "bad key": "x" } }] });
+    expect(bad.status).toBe(400);
+  });
+
+  it("keeps metadata readable after encryption", async () => {
+    const out = await json(
+      post("/pdf/edit", {
+        source: { base64: b64(await samplePdf(1)) },
+        operations: [
+          { op: "setMetadata", copyright: "© Acme", custom: { MadeFor: "Bob" } },
+          { op: "encrypt", ownerPassword: "o", userPassword: "u" },
+        ],
+      }),
+    );
+    const { metadata } = await json(post("/pdf/info", { source: { key: out.key, password: "u" } }));
+    expect(metadata).toMatchObject({ copyright: "© Acme", custom: { MadeFor: "Bob" } });
   });
 });

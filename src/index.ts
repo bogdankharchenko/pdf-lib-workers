@@ -5,11 +5,12 @@ import { z } from "zod";
 import type { Env } from "./env";
 import { HttpError, badRequest } from "./errors";
 import { documentInfo, extractText } from "./inspect";
-import { Editor, Operation, Operations, PageSize, pageSize } from "./operations";
+import { Editor, Operation, Operations, addSource } from "./operations";
 import { resolvePages } from "./pages";
-import { MergeSource, Output, PageSpec, PdfSource, R2Key } from "./schemas";
+import { MergeSource, Output, PageSize, PageSpec, PdfSource, R2Key, pageSize } from "./schemas";
 import { signedUrl, timingSafeEqual, verifySignature } from "./signing";
-import { type Ctx, type Upload, assignRefs, loadPdf, looksLikePdf, openPdf, readAhead, readSource } from "./sources";
+import { imageKind } from "./images";
+import { type Ctx, type Upload, assignRefs, findUpload, loadPdf, looksLikePdf, readAhead, readSource } from "./sources";
 
 type App = { Bindings: Env };
 type C = Context<App>;
@@ -138,6 +139,23 @@ function bytesToBase64(bytes: Uint8Array): string {
   let s = "";
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
+}
+
+/** Uploads that `value` (e.g. the operations list) refers to with { upload: … }. */
+function usedUploads(value: unknown, uploads: Upload[], found = new Set<Upload>()): Set<Upload> {
+  if (Array.isArray(value)) for (const v of value) usedUploads(v, uploads, found);
+  else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      if (k === "upload" && typeof v === "string") {
+        try {
+          found.add(findUpload(uploads, v));
+        } catch {
+          // Unknown names fail later, with the full error.
+        }
+      } else usedUploads(v, uploads, found);
+    }
+  }
+  return found;
 }
 
 const ctxOf = (c: C, uploads: Upload[]): Ctx => ({ env: c.env, uploads, origin: new URL(c.req.url).origin });
@@ -278,10 +296,12 @@ app.post("/pdf/edit", async (c) => {
 
 app.post("/pdf/merge", async (c) => {
   const { body, uploads } = await readRequest(c);
-  // With no sources listed, merge every uploaded PDF in the order sent.
+  // With no sources listed, merge every uploaded PDF and image in the order
+  // sent, except files the operations use (such as a watermark logo).
   if (body.sources === undefined && uploads.length) {
-    const pdfs = uploads.filter((u) => looksLikePdf(u.bytes));
-    body.sources = (pdfs.length ? pdfs : uploads).map((u) => ({ upload: u.ref }));
+    const used = usedUploads(body.operations, uploads);
+    const pages = uploads.filter((u) => !used.has(u) && (looksLikePdf(u.bytes) || imageKind(u.bytes)));
+    body.sources = (pages.length ? pages : uploads).map((u) => ({ upload: u.ref }));
   }
   const req = z
     .object({
@@ -295,8 +315,7 @@ app.post("/pdf/merge", async (c) => {
   const doc = await PDFDocument.create();
   for (const [i, src] of req.sources.entries()) {
     try {
-      const part = await openPdf(await read(i), src.password);
-      for (const p of await doc.copyPages(part, resolvePages(src.pages, part.getPageCount()))) doc.addPage(p);
+      await addSource(doc, await read(i), src);
     } catch (e) {
       if (e instanceof HttpError) {
         e.message = `sources[${i}]: ${e.message}`;

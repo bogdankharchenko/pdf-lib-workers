@@ -3,7 +3,7 @@ import {
   PDFDocument,
   PDFFont,
   PDFImage,
-  PageSizes,
+  PDFPage,
   StandardFonts,
   degrees,
   rgb,
@@ -16,20 +16,19 @@ import {
 import { z } from "zod";
 import { badRequest } from "./errors";
 import { resolvePages } from "./pages";
-import { FileSource, PageSpec, PdfSource, Source } from "./schemas";
-import { type Ctx, loadPdf, readSource } from "./sources";
+import { FileSource, ImagePageOptions, PageSize, PageSpec, PdfSource, Source, pageSize } from "./schemas";
+import { addImagePage, drawImageInBox, embedImage, imageKind, uprightSize } from "./images";
+import { COPYRIGHT, COPYRIGHT_URL, CUSTOM_KEY, setInfo, writeXmp } from "./metadata";
+import { type Ctx, openPdf, readSource } from "./sources";
 
 const Color = z.string().regex(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i, "Color must be hex, e.g. #ff0000");
 const Opacity = z.number().min(0).max(1);
-export const PageSize = z.union([
-  z.enum(Object.keys(PageSizes) as [keyof typeof PageSizes, ...(keyof typeof PageSizes)[]]),
-  z.tuple([z.number().positive(), z.number().positive()]),
-]);
 /** A standard PDF font name (e.g. "Helvetica-Bold") or a TTF/OTF font file. */
 const Font = z.union([z.enum(Object.values(StandardFonts) as [string, ...string[]]), FileSource]);
 /** "bottom-left" is native PDF coordinates; "top-left" measures y down from the top edge. */
 const Origin = z.enum(["bottom-left", "top-left"]).default("bottom-left");
 const Point = z.object({ x: z.number(), y: z.number() });
+const Position = z.enum(["center", "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"]);
 
 export const Operation = z.discriminatedUnion("op", [
   z.object({ op: z.literal("addPage"), size: PageSize.default("A4"), at: z.number().int().positive().optional(), count: z.number().int().positive().max(1000).default(1) }),
@@ -40,7 +39,8 @@ export const Operation = z.discriminatedUnion("op", [
   z.object({ op: z.literal("rotatePages"), pages: PageSpec.optional(), degrees: z.number().int().multipleOf(90), relative: z.boolean().default(true) }),
   z.object({ op: z.literal("resizePages"), pages: PageSpec.optional(), size: PageSize, scaleContent: z.boolean().default(true) }),
   z.object({ op: z.literal("cropPages"), pages: PageSpec.optional(), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() }),
-  z.object({ op: z.literal("insertPdf"), source: PdfSource, pages: PageSpec.optional(), at: z.number().int().positive().optional() }),
+  /** Inserts PDF pages, or a PNG/JPEG image as a page. */
+  z.object({ op: z.literal("insertPdf"), source: PdfSource, pages: PageSpec.optional(), at: z.number().int().positive().optional(), ...ImagePageOptions }),
   z.object({
     op: z.literal("drawText"),
     pages: PageSpec.optional(),
@@ -105,13 +105,21 @@ export const Operation = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("watermark"),
     pages: PageSpec.optional(),
-    text: z.string().min(1),
+    /** Text to stamp, or… */
+    text: z.string().min(1).optional(),
+    /** …a PNG/JPEG image, e.g. a logo. */
+    image: Source.optional(),
+    /** Image width as a share of the page width. */
+    scale: z.number().positive().max(1).default(0.5),
     size: z.number().positive().default(60),
     font: Font.default(StandardFonts.HelveticaBold),
     color: Color.default("#888888"),
     opacity: Opacity.default(0.25),
-    rotate: z.number().default(45),
-  }),
+    /** Degrees; defaults to 45 for text, 0 for images. */
+    rotate: z.number().optional(),
+    position: Position.default("center"),
+    margin: z.number().nonnegative().default(24),
+  }).refine((o) => !o.text !== !o.image, "Give text or image"),
   z.object({
     op: z.literal("pageNumbers"),
     pages: PageSpec.optional(),
@@ -142,6 +150,14 @@ export const Operation = z.discriminatedUnion("op", [
     creator: z.string().optional(),
     producer: z.string().optional(),
     language: z.string().optional(),
+    /** e.g. "© 2026 Acme Inc. All rights reserved." */
+    copyright: z.string().optional(),
+    /** Page with licence or ownership details. */
+    copyrightUrl: z.url().optional(),
+    /** Your own fields, e.g. { "MadeFor": "Client X", "Origin": "billing-service" }. null removes one. */
+    custom: z
+      .record(z.string().regex(CUSTOM_KEY, "Custom keys are letters, digits and _, starting with a letter"), z.string().nullable())
+      .optional(),
   }),
   z.object({
     op: z.literal("attachFile"),
@@ -169,11 +185,26 @@ export const Operation = z.discriminatedUnion("op", [
   }),
 ]);
 export type Operation = z.infer<typeof Operation>;
+
+/**
+ * Adds a PDF's pages (or some of them) or a PNG/JPEG image as a page, at
+ * index `at` (default: the end). Used by merge and insertPdf.
+ */
+export async function addSource(
+  doc: PDFDocument,
+  bytes: Uint8Array,
+  opts: { password?: string; pages?: z.infer<typeof PageSpec>; size: z.infer<typeof ImagePageOptions.size>; margin: number },
+  at = doc.getPageCount(),
+) {
+  if (imageKind(bytes)) {
+    if (opts.pages !== undefined) throw badRequest('"pages" does not apply to an image');
+    return addImagePage(doc, bytes, opts.size === "image" ? "image" : pageSize(opts.size), opts.margin, at);
+  }
+  const src = await openPdf(bytes, opts.password);
+  for (const p of await doc.copyPages(src, resolvePages(opts.pages, src.getPageCount()))) doc.insertPage(at++, p);
+}
 export const Operations = z.array(Operation).max(500);
 
-export function pageSize(size: z.infer<typeof PageSize>): [number, number] {
-  return typeof size === "string" ? [...PageSizes[size]] : size;
-}
 
 function color(hex: string) {
   let h = hex.replace("#", "");
@@ -185,7 +216,7 @@ function color(hex: string) {
 /** Runs operations in order against one document, caching fonts and images. */
 export class Editor {
   private fonts = new Map<string, PDFFont>();
-  private images = new Map<string, PDFImage>();
+  private images = new Map<string, { image: PDFImage; orientation: number }>();
 
   constructor(
     private ctx: Ctx,
@@ -223,14 +254,13 @@ export class Editor {
     return f;
   }
 
-  private async image(spec: Source): Promise<PDFImage> {
+  private async image(spec: Source) {
     const id = JSON.stringify(spec);
     let img = this.images.get(id);
     if (!img) {
       const bytes = await readSource(this.ctx, spec);
-      if (bytes[0] === 0x89 && bytes[1] === 0x50) img = await this.doc.embedPng(bytes);
-      else if (bytes[0] === 0xff && bytes[1] === 0xd8) img = await this.doc.embedJpg(bytes);
-      else throw badRequest("Image must be PNG or JPEG");
+      if (!imageKind(bytes)) throw badRequest("Image must be PNG or JPEG");
+      img = await embedImage(this.doc, bytes);
       this.images.set(id, img);
     }
     return img;
@@ -298,10 +328,8 @@ export class Editor {
         for (const p of this.pages(op.pages)) p.setCropBox(op.x, op.y, op.width, op.height);
         break;
       case "insertPdf": {
-        const src = await loadPdf(this.ctx, op.source);
-        const copies = await doc.copyPages(src, resolvePages(op.pages, src.getPageCount()));
-        let at = op.at === undefined ? doc.getPageCount() : Math.min(op.at - 1, doc.getPageCount());
-        for (const p of copies) doc.insertPage(at++, p);
+        const at = op.at === undefined ? doc.getPageCount() : Math.min(op.at - 1, doc.getPageCount());
+        await addSource(doc, await readSource(this.ctx, op.source), op, at);
         break;
       }
       case "drawText": {
@@ -322,10 +350,17 @@ export class Editor {
         break;
       }
       case "drawImage": {
-        const img = await this.image(op.image);
-        const w = op.width ?? (op.height ? (img.width * op.height) / img.height : img.width);
-        const h = op.height ?? (op.width ? (img.height * op.width) / img.width : img.height);
+        const { image: img, orientation } = await this.image(op.image);
+        const [uw, uh] = uprightSize(img, orientation);
+        const w = op.width ?? (op.height ? (uw * op.height) / uh : uw);
+        const h = op.height ?? (op.width ? (uh * op.width) / uw : uh);
         for (const p of this.pages(op.pages)) {
+          const y = flipY(p, op.origin, op.y, h);
+          // Unrotated images are drawn upright per their EXIF orientation.
+          if (op.rotate === undefined) {
+            drawImageInBox(p, img, orientation, { x: op.x, y, width: w, height: h }, op.opacity);
+            continue;
+          }
           p.drawImage(img, {
             x: op.x,
             y: flipY(p, op.origin, op.y, h),
@@ -373,16 +408,38 @@ export class Editor {
         break;
       }
       case "watermark": {
-        const font = await this.font(op.font);
-        const tw = font.widthOfTextAtSize(op.text, op.size);
-        const th = font.heightAtSize(op.size, { descender: false });
-        const rad = (op.rotate * Math.PI) / 180;
-        for (const p of this.pages(op.pages)) {
-          const { width, height } = p.getSize();
-          // Offset the start so the rotated text's middle lands on the page centre.
-          const x = width / 2 - (Math.cos(rad) * tw - Math.sin(rad) * th) / 2;
-          const y = height / 2 - (Math.sin(rad) * tw + Math.cos(rad) * th) / 2;
-          p.drawText(op.text, { x, y, size: op.size, font, color: color(op.color), opacity: op.opacity, rotate: degrees(op.rotate) });
+        const rotate = op.rotate ?? (op.text ? 45 : 0);
+        const rad = (rotate * Math.PI) / 180;
+        const [cos, sin] = [Math.cos(rad), Math.sin(rad)];
+        let draw: (page: PDFPage, w: number, h: number, x: number, y: number) => void;
+        let sizeOn: (page: PDFPage) => [number, number];
+        if (op.text) {
+          const font = await this.font(op.font);
+          const tw = font.widthOfTextAtSize(op.text, op.size);
+          const th = font.heightAtSize(op.size, { descender: false });
+          sizeOn = () => [tw, th];
+          draw = (p, _w, _h, x, y) => p.drawText(op.text!, { x, y, size: op.size, font, color: color(op.color), opacity: op.opacity, rotate: degrees(rotate) });
+        } else {
+          const { image, orientation } = await this.image(op.image!);
+          const [uw, uh] = uprightSize(image, orientation);
+          sizeOn = (p) => [p.getWidth() * op.scale, (p.getWidth() * op.scale * uh) / uw];
+          draw = (p, w, h, x, y) => {
+            if (rotate === 0) return drawImageInBox(p, image, orientation, { x, y, width: w, height: h }, op.opacity);
+            p.drawImage(image, { x, y, width: w, height: h, opacity: op.opacity, rotate: degrees(rotate) });
+          };
+        }
+        const all = doc.getPages();
+        for (const i of resolvePages(op.pages, all.length)) {
+          const p = all[i];
+          const [w, h] = sizeOn(p);
+          // Bounding box of the rotated item, then the spot its centre should land on.
+          const bw = Math.abs(cos) * w + Math.abs(sin) * h;
+          const bh = Math.abs(sin) * w + Math.abs(cos) * h;
+          const [v, hz] = op.position === "center" ? ["center", "center"] : op.position.split("-");
+          const cx = hz === "left" ? op.margin + bw / 2 : hz === "right" ? p.getWidth() - op.margin - bw / 2 : p.getWidth() / 2;
+          const cy = v === "bottom" ? op.margin + bh / 2 : v === "top" ? p.getHeight() - op.margin - bh / 2 : p.getHeight() / 2;
+          // Items rotate around their bottom-left corner; shift so the centre lands on (cx, cy).
+          draw(p, w, h, cx - (cos * w - sin * h) / 2, cy - (sin * w + cos * h) / 2);
         }
         break;
       }
@@ -431,7 +488,11 @@ export class Editor {
         if (op.creator !== undefined) doc.setCreator(op.creator);
         if (op.producer !== undefined) doc.setProducer(op.producer);
         if (op.language !== undefined) doc.setLanguage(op.language);
+        if (op.copyright !== undefined) setInfo(doc, COPYRIGHT, op.copyright);
+        if (op.copyrightUrl !== undefined) setInfo(doc, COPYRIGHT_URL, op.copyrightUrl);
+        for (const [k, v] of Object.entries(op.custom ?? {})) setInfo(doc, k, v);
         doc.setModificationDate(new Date());
+        writeXmp(doc);
         break;
       case "attachFile":
         await doc.attach(await readSource(this.ctx, op.file), op.name, { mimeType: op.mimeType, description: op.description });
@@ -441,7 +502,17 @@ export class Editor {
           ownerPassword: op.ownerPassword,
           userPassword: op.userPassword ?? "",
           algorithm: op.algorithm,
-          permissions: op.permissions,
+          // Allow everything unless the request turns it off (the library's default is to deny all).
+          permissions: {
+            printing: "highResolution",
+            modifying: true,
+            copying: true,
+            annotating: true,
+            fillingForms: true,
+            contentAccessibility: true,
+            documentAssembly: true,
+            ...op.permissions,
+          },
         });
         break;
     }

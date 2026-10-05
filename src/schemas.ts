@@ -1,4 +1,21 @@
+import { PageSizes } from "@cantoo/pdf-lib";
 import { z } from "zod";
+
+/** A paper name ("A4", "Letter", …) or [width, height] in points. */
+export const PageSize = z.union([
+  z.enum(Object.keys(PageSizes) as [keyof typeof PageSizes, ...(keyof typeof PageSizes)[]]),
+  z.tuple([z.number().positive(), z.number().positive()]),
+]);
+
+export function pageSize(size: z.infer<typeof PageSize>): [number, number] {
+  return typeof size === "string" ? [...PageSizes[size]] : size;
+}
+
+/** How an image source becomes a page: fitted on paper of `size` ("image" = the image's own size). */
+export const ImagePageOptions = {
+  size: z.union([PageSize, z.literal("image")]).default("A4"),
+  margin: z.number().nonnegative().default(0),
+};
 
 export const PageSpec = z.union([z.string(), z.array(z.number().int())]);
 
@@ -42,8 +59,8 @@ export type Source = z.infer<typeof FileSource>;
 export const PdfSource = z.preprocess(shorthand, source({ password: z.string().optional() }));
 export type PdfSource = z.infer<typeof PdfSource>;
 
-/** A PDF source for merging, optionally limited to some pages. */
-export const MergeSource = z.preprocess(shorthand, source({ password: z.string().optional(), pages: PageSpec.optional() }));
+/** A PDF (optionally limited to some pages) or a PNG/JPEG image to merge. */
+export const MergeSource = z.preprocess(shorthand, source({ password: z.string().optional(), pages: PageSpec.optional(), ...ImagePageOptions }));
 
 export const R2Key = z
   .string()

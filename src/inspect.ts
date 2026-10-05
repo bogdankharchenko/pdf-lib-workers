@@ -6,9 +6,11 @@ import {
   PDFRadioGroup,
   PDFTextField,
 } from "@cantoo/pdf-lib";
+import { COPYRIGHT, COPYRIGHT_URL, customInfo } from "./metadata";
 import { resolvePages } from "./pages";
 
 export function documentInfo(doc: PDFDocument) {
+  const custom = customInfo(doc);
   let fields: { name: string; type: string; value: unknown; options?: string[] }[] = [];
   try {
     fields = doc.getForm().getFields().map((f) => {
@@ -36,6 +38,9 @@ export function documentInfo(doc: PDFDocument) {
       language: doc.getLanguage() ?? null,
       creationDate: doc.getCreationDate()?.toISOString() ?? null,
       modificationDate: doc.getModificationDate()?.toISOString() ?? null,
+      copyright: custom[COPYRIGHT] ?? null,
+      copyrightUrl: custom[COPYRIGHT_URL] ?? null,
+      custom: Object.fromEntries(Object.entries(custom).filter(([k]) => k !== COPYRIGHT && k !== COPYRIGHT_URL)),
     },
     pages: doc.getPages().map((p, i) => {
       const { width, height } = p.getSize();

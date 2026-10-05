@@ -1,4 +1,4 @@
-import { PDFDocument, EncryptedPDFError } from "@cantoo/pdf-lib";
+import { PDFDict, PDFDocument, PDFRef, EncryptedPDFError } from "@cantoo/pdf-lib";
 import type { Env } from "./env";
 import { HttpError, badRequest } from "./errors";
 import type { PdfSource, Source } from "./schemas";
@@ -156,7 +156,9 @@ export async function loadPdf(ctx: Ctx, src: PdfSource): Promise<PDFDocument> {
 
 export async function openPdf(bytes: Uint8Array, password?: string): Promise<PDFDocument> {
   try {
-    return await PDFDocument.load(bytes, { password, updateMetadata: false });
+    const doc = await PDFDocument.load(bytes, { password, updateMetadata: false });
+    if (!doc.context.trailerInfo.Info && password !== undefined) recoverInfo(doc, bytes);
+    return doc;
   } catch (e) {
     if (e instanceof EncryptedPDFError) {
       throw new HttpError(422, password ? "Wrong password for encrypted PDF" : 'PDF is encrypted; pass "password" with the source');
@@ -167,4 +169,18 @@ export async function openPdf(bytes: Uint8Array, password?: string): Promise<PDF
     }
     throw new HttpError(422, `Could not parse PDF: ${(e as Error).message}`);
   }
+}
+
+/**
+ * @cantoo/pdf-lib drops the trailer's /Info reference when it loads an
+ * encrypted file that uses a cross-reference stream, which hides title,
+ * copyright and custom fields. The file itself is fine (other readers see
+ * them), so find the reference in the raw bytes and restore it.
+ */
+function recoverInfo(doc: PDFDocument, bytes: Uint8Array) {
+  const text = new TextDecoder("latin1").decode(bytes);
+  const m = [...text.matchAll(/\/Info\s+(\d+)\s+(\d+)\s+R/g)].pop();
+  if (!m) return;
+  const ref = PDFRef.of(Number(m[1]), Number(m[2]));
+  if (doc.context.lookup(ref) instanceof PDFDict) doc.context.trailerInfo.Info = ref;
 }

@@ -36,6 +36,7 @@ Anywhere the API takes a file (PDF, image, font, attachment), give it one of:
 | `{ "upload": "a" }` | A file sent in the same multipart request, by field name or file name |
 
 - PDF sources also take `"password"` for encrypted files; merge sources take `"pages"`.
+- **Images:** a PNG or JPEG works wherever a PDF source does in `/pdf/merge` and `insertPdf`, and becomes one page. It is fitted on A4 (turned landscape when wide), or set `"size": "Letter"`, `[w, h]` or `"image"` (page = image size), plus `"margin"` in points. Phone photos are turned upright using their EXIF orientation.
 - Font fields need the object form, since a bare string there is a font name.
 - URL downloads stop after 30 s (`FETCH_TIMEOUT_MS`) or 50 MB (`MAX_FETCH_BYTES`). Errors name the bad input, e.g. `sources[1]: https://… returned HTTP 404` or `Not a PDF (starts with "<!DOCTYPE html>…")`.
 - Links this API returned are read straight from R2, so outputs can feed later calls.
@@ -46,7 +47,7 @@ Send file data in any of three ways:
 - **Raw body** — the PDF itself (`Content-Type: application/pdf`, or none), with the JSON body URL-encoded in `?options=`.
 - **JSON** — with `base64` sources.
 
-If you leave out `source`, the single uploaded file (or the one in field `file`) is used. If `/pdf/merge` gets no `sources`, it merges every uploaded PDF in the order sent.
+If you leave out `source`, the single uploaded file (or the one in field `file`) is used. If `/pdf/merge` gets no `sources`, it merges every uploaded PDF and image in the order sent, skipping files the operations use (such as a watermark logo).
 
 ## Output
 
@@ -74,7 +75,7 @@ Endpoints that make a PDF take an optional `output`:
 | `POST /pdf/text` | `{ source, pages?, items? }` | Text per page (`items: true` adds positions and fonts) |
 | `POST /pdf/create` | `{ size?, pageCount?, operations?, output? }` | New PDF |
 | `POST /pdf/edit` | `{ source, operations, output? }` | Run operations on a PDF |
-| `POST /pdf/merge` | `{ sources: [{ …source, pages? }], operations?, output? }` | Join PDFs |
+| `POST /pdf/merge` | `{ sources: [{ …source, pages?, size?, margin? }], operations?, output? }` | Join PDFs and images |
 | `POST /pdf/split` | `{ source, ranges? \| every?, prefix?, linkTtl? }` | One R2 file per part |
 
 **Pages** are 1-based. `pages` takes an array (`[1, 3, -1]`, negatives count from the end) or a string: `"1-3,5"`, `"last"`, `"odd"`, `"even"`, `"all"`, `"5-1"` (reversed). Leaving it out means every page.
@@ -98,21 +99,38 @@ Run in order, each `{ "op": "<name>", … }`. Errors name the failing step, e.g.
 | `rotatePages` | `pages`, `degrees` (multiple of 90), `relative` (true) |
 | `resizePages` | `pages`, `size`, `scaleContent` (true: fit and centre) |
 | `cropPages` | `pages`, `x`, `y`, `width`, `height` |
-| `insertPdf` | `source`, `pages`, `at` (end) |
+| `insertPdf` | `source` (PDF or image), `pages`, `at` (end), `size`/`margin` for images |
 | `drawText` | `pages`, `text`, `x`, `y`, `origin`, `size` (12), `font` (Helvetica), `color`, `opacity`, `rotate`, `maxWidth` (wraps), `lineHeight` |
 | `drawImage` | `pages`, `image` (PNG/JPEG source), `x`, `y`, `origin`, `width`/`height` (keeps aspect if one given), `opacity`, `rotate` |
 | `drawRectangle` | `pages`, `x`, `y`, `origin`, `width`, `height`, `color`, `borderColor`, `borderWidth`, `opacity`, `rotate` |
 | `drawLine` | `pages`, `start {x,y}`, `end {x,y}`, `origin`, `thickness` (1), `color`, `opacity` |
 | `drawSvg` | `pages`, `svg` (markup), `x`, `y` (top-left of the SVG), `origin`, `width`, `height` |
-| `watermark` | `pages`, `text`, `size` (60), `font`, `color` (#888888), `opacity` (0.25), `rotate` (45) — centred |
+| `watermark` | `pages`, `text` **or** `image` (PNG/JPEG source, e.g. a logo), `position` (center, top-left, top-center, top-right, bottom-…), `margin` (24), `opacity` (0.25), `rotate` (45 for text, 0 for images); text: `size` (60), `font`, `color` (#888888); image: `scale` (0.5 = half the page width) |
 | `pageNumbers` | `pages`, `format` ("{page} / {total}"), `position` (bottom-center), `margin` (24), `size` (10), `font`, `color`, `startAt` (1) |
 | `fillForm` | `fields { name: string \| boolean \| string[] }`, `flatten` (false), `strict` (true: unknown names fail) |
 | `flattenForm` | |
-| `setMetadata` | `title`, `author`, `subject`, `keywords[]`, `creator`, `producer`, `language` |
+| `setMetadata` | `title`, `author`, `subject`, `keywords[]`, `creator`, `producer`, `language`, `copyright`, `copyrightUrl`, `custom { Key: "value" \| null }` — see below |
 | `attachFile` | `file` (source), `name`, `mimeType`, `description` |
-| `encrypt` | `ownerPassword`, `userPassword`, `algorithm` (AES-256), `permissions { printing, modifying, copying, annotating, fillingForms, contentAccessibility, documentAssembly }` |
+| `encrypt` | `ownerPassword`, `userPassword`, `algorithm` (AES-256), `permissions { printing, modifying, copying, annotating, fillingForms, contentAccessibility, documentAssembly }` — all allowed unless set to `false` |
 
 `font` is a standard font name (`Helvetica`, `Helvetica-Bold`, `Times-Roman`, `Courier`, …) or a TTF/OTF source. Standard fonts only cover Latin text; use a font file for anything else. Font files are subset, so only used glyphs are embedded.
+
+## Metadata: who, where, copyright
+
+`setMetadata` writes to both places PDF tools look: the Info dictionary (shown in most viewers' document properties) and the XMP packet (where Acrobat shows **Copyright Status/Notice/Info URL**, and what asset tools index).
+
+```json
+{ "op": "setMetadata",
+  "title": "Q3 report", "author": "Acme Inc.",
+  "copyright": "© 2026 Acme Inc. All rights reserved.",
+  "copyrightUrl": "https://acme.example/licence",
+  "custom": { "MadeFor": "Client X", "Origin": "billing-service", "OrderId": "A-1001" } }
+```
+
+- `custom` keys are letters, digits and `_`. Set a key to `null` to remove it.
+- `/pdf/info` returns them under `metadata.copyright`, `metadata.copyrightUrl` and `metadata.custom`.
+- Metadata is invisible on the page. To print "Prepared for Client X" on every page, add a `drawText` or `watermark` step too.
+- Anyone with the file can edit metadata, so treat it as a label, not proof. Encrypting with an owner password stops casual changes.
 
 ## Examples
 
@@ -133,6 +151,14 @@ curl -s -H "$H" "$API/pdf/merge" -F files=@one.pdf -F files=@two.pdf -F files=@t
 curl -s -H "$H" "$API/pdf/merge" -o out.pdf -F cover=@cover.pdf -F 'options={
   "sources": [{ "upload": "cover" }, { "url": "https://example.com/report.pdf", "pages": "2-last" }],
   "output": { "return": "pdf" }
+}'
+
+# Scans and photos into one PDF, logo in the corner, copyright set
+curl -s -H "$H" "$API/pdf/merge" -F files=@scan1.jpg -F files=@scan2.jpg -F files=@invoice.pdf -F logo=@logo.png -F 'options={
+  "operations": [
+    { "op": "watermark", "image": { "upload": "logo" }, "scale": 0.15, "position": "top-right", "opacity": 0.8 },
+    { "op": "setMetadata", "copyright": "© 2026 Acme Inc.", "custom": { "MadeFor": "Client X" } }
+  ]
 }'
 
 # Watermark a local file
