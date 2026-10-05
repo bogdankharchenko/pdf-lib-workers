@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "pdf-lib-workers",
+  "name": "pdfmill",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-15",
   "compatibility_flags": ["nodejs_compat"],
@@ -8,7 +8,7 @@
   // Paid plan: allow up to 5 minutes of CPU per request for large PDFs.
   "limits": { "cpu_ms": 300000 },
   "r2_buckets": [
-    { "binding": "PDF_BUCKET", "bucket_name": "pdf-lib-workers" }
+    { "binding": "PDF_BUCKET", "bucket_name": "pdfmill" }
   ],
   "vars": {
     // Lifetime of signed download links, in seconds.

@@ -89,7 +89,7 @@ async function fetchUrl(ctx: Ctx, url: string, headers?: Record<string, string>)
   try {
     const res = await fetch(url, {
       redirect: "follow",
-      headers: { "user-agent": "pdf-lib-workers", ...headers },
+      headers: { "user-agent": "pdfmill", ...headers },
       signal: AbortSignal.timeout(timeout),
     });
     if (!res.ok) throw new HttpError(502, `${url} returned HTTP ${res.status}`);

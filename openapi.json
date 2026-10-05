@@ -1,12 +1,12 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "pdf-lib-workers",
-    "version": "0.2.2",
+    "title": "pdfmill",
+    "version": "0.3.0",
     "description": "Edit, merge, split, fill, stamp and inspect PDFs. Results are stored in R2 and returned as signed links.\n\n**Workflow that works well:**\n1. **Inspect first.** `POST /pdf/info` returns pages, sizes, form fields (names, types, choices), layers and attachments.\n2. **Act.** `/pdf/edit`, `/pdf/merge` and `/pdf/create` all take an `operations` list, run in order, so one request can build, stamp and lock a document.\n3. **Verify.** Run `/pdf/info` or `/pdf/text` on the result's `key`.\n\n**Sending files.** Any field typed Source, PdfSource or MergeSource accepts a URL string, an R2 key string, or an object: `{ \"url\" }` (optionally with `headers`), `{ \"key\" }`, `{ \"base64\" }`, or `{ \"upload\" }` naming a multipart file. Send files as multipart/form-data with the JSON body in an `options` field, or POST a PDF as the raw body with the JSON body URL-encoded in `?options=`.\n\n**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed `url` that works without the API key until `expiresAt`. Send `Accept: application/pdf` to get the bytes instead (with `X-File-Key`, `X-File-Url` and `X-Page-Count` headers); without it, or with `*/*`, the response is JSON. The API's own result links can be passed back in as sources.\n\n**Things that trip people up:**\n- Coordinates are PDF points (72 per inch) from the **bottom-left** corner. Add `\"origin\": \"top-left\"` to measure y down from the top.\n- Pages are **1-based**; negative numbers count from the end.\n- Built-in fonts cover Latin text only. Pass a font file for other scripts; text a font cannot draw is rejected (400), never replaced with \"?\".\n- Some sites block requests from Cloudflare Workers (403 from the source URL). Send those files as uploads or base64.\n- Opening a PDF with `password` saves the result **without** a password; add an `encrypt` operation to lock it again.\n- Run `setMetadata` before `convertToPDFA`.\n- Errors are JSON (ErrorResponse) and name the failing input, e.g. `operations[2] (removePages): Page 9 is out of range`.",
     "contact": {
-      "name": "pdf-lib-workers on GitHub",
-      "url": "https://github.com/bogdankharchenko/pdf-lib-workers"
+      "name": "pdfmill on GitHub",
+      "url": "https://github.com/bogdankharchenko/pdfmill"
     },
     "license": {
       "name": "MIT",
@@ -15,11 +15,11 @@
   },
   "externalDocs": {
     "description": "README: examples, limits and setup",
-    "url": "https://github.com/bogdankharchenko/pdf-lib-workers#readme"
+    "url": "https://github.com/bogdankharchenko/pdfmill#readme"
   },
   "servers": [
     {
-      "url": "https://pdf-lib-workers.{subdomain}.workers.dev",
+      "url": "https://pdfmill.{subdomain}.workers.dev",
       "description": "Your deployment; a custom domain works the same way. GET /openapi.json on a deployment lists its real address here.",
       "variables": {
         "subdomain": {

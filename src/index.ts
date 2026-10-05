@@ -193,7 +193,7 @@ const ctxOf = (c: C, uploads: Upload[]): Ctx => ({ env: c.env, uploads, origin: 
 
 app.get("/", (c) =>
   c.json({
-    name: "pdf-lib-workers",
+    name: "pdfmill",
     openapi: "/openapi.json",
     auth: "Authorization: Bearer <API_KEY>",
     sources:

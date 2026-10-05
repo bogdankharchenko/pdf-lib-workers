@@ -1,4 +1,4 @@
-# pdf-lib-workers
+# pdfmill
 
 A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.com/package/@cantoo/pdf-lib) and stores the results in a private R2 bucket. You send PDFs (and images, fonts) as URLs or file data; you get back a download link or the PDF itself.
 
@@ -81,16 +81,16 @@ Things that trip people (and agents) up:
 ```sh
 npm install
 npx wrangler login
-npx wrangler r2 bucket create pdf-lib-workers
+npx wrangler r2 bucket create pdfmill
 npx wrangler secret put API_KEY        # any long random string
 npx wrangler deploy
 
 # Delete generated files after 7 days
-npx wrangler r2 bucket lifecycle add pdf-lib-workers expire-outputs outputs/ --expire-days 7
-npx wrangler r2 bucket lifecycle add pdf-lib-workers expire-extracted extracted/ --expire-days 7
+npx wrangler r2 bucket lifecycle add pdfmill expire-outputs outputs/ --expire-days 7
+npx wrangler r2 bucket lifecycle add pdfmill expire-extracted extracted/ --expire-days 7
 ```
 
-The two expiry rules cover where the API saves results by default: `outputs/` (`create`, `edit`, `merge`, `split`) and `extracted/` (`/pdf/extract`). Seven days matches the longest download link (`linkTtl` max), so a link and its file go away together. Files saved under a key or prefix you choose (e.g. `output.key: "invoices/42.pdf"`) and files you put in R2 yourself (templates, fonts) are kept. Check the rules with `npx wrangler r2 bucket lifecycle list pdf-lib-workers`; R2 deletes expired files within about a day of their expiry.
+The two expiry rules cover where the API saves results by default: `outputs/` (`create`, `edit`, `merge`, `split`) and `extracted/` (`/pdf/extract`). Seven days matches the longest download link (`linkTtl` max), so a link and its file go away together. Files saved under a key or prefix you choose (e.g. `output.key: "invoices/42.pdf"`) and files you put in R2 yourself (templates, fonts) are kept. Check the rules with `npx wrangler r2 bucket lifecycle list pdfmill`; R2 deletes expired files within about a day of their expiry.
 
 Optional: `npx wrangler secret put SIGNING_KEY` — a separate key for download links (defaults to `API_KEY`). Changing it voids all links already handed out.
 
@@ -104,7 +104,7 @@ Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `
 - The R2 bucket is private; files are only reachable through the Worker.
 - CORS is open (`*`), so browsers can call the API, but only with the key, so do that only from trusted internal tools.
 
-There are no upload, list or delete endpoints. Send inputs with each request. To keep reusable files in R2 (templates, fonts, logos) and refer to them by `key`, add them with the Cloudflare dashboard or `npx wrangler r2 object put pdf-lib-workers/<key> --file <path> --remote`. Generated results are removed by the expiry rules in [Setup](#setup).
+There are no upload, list or delete endpoints. Send inputs with each request. To keep reusable files in R2 (templates, fonts, logos) and refer to them by `key`, add them with the Cloudflare dashboard or `npx wrangler r2 object put pdfmill/<key> --file <path> --remote`. Generated results are removed by the expiry rules in [Setup](#setup).
 
 ## Configuration
 
@@ -406,7 +406,7 @@ Errors are JSON: `{ "error": "message", "details": … }`. `details` lists each 
 ## Examples
 
 ```sh
-API=https://pdf-lib-workers.<you>.workers.dev
+API=https://pdfmill.<you>.workers.dev
 H='Authorization: Bearer YOUR_KEY'
 J='Content-Type: application/json'
 

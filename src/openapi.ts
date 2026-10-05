@@ -5,7 +5,7 @@ import { SOURCE_KINDS, SOURCE_OBJECT_IDS } from "./schemas";
 import "./requests";
 import "./replies";
 
-const REPOSITORY = "https://github.com/bogdankharchenko/pdf-lib-workers";
+const REPOSITORY = "https://github.com/bogdankharchenko/pdfmill";
 
 const ref = (id: string) => ({ $ref: `#/components/schemas/${id}` });
 const json = (id: string) => ({ "application/json": { schema: ref(id) } });
@@ -197,16 +197,16 @@ export function openApiDocument() {
   return {
     openapi: "3.1.0",
     info: {
-      title: "pdf-lib-workers",
+      title: "pdfmill",
       version,
       description: DESCRIPTION,
-      contact: { name: "pdf-lib-workers on GitHub", url: REPOSITORY },
+      contact: { name: "pdfmill on GitHub", url: REPOSITORY },
       license: { name: license, identifier: license },
     },
     externalDocs: { description: "README: examples, limits and setup", url: `${REPOSITORY}#readme` },
     servers: [
       {
-        url: "https://pdf-lib-workers.{subdomain}.workers.dev",
+        url: "https://pdfmill.{subdomain}.workers.dev",
         description: "Your deployment; a custom domain works the same way. GET /openapi.json on a deployment lists its real address here.",
         variables: { subdomain: { default: "your-subdomain", description: "Your workers.dev subdomain." } },
       },
