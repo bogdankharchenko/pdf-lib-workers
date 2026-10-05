@@ -58,12 +58,15 @@ npx wrangler login
 npx wrangler r2 bucket create pdf-lib-workers
 npx wrangler secret put API_KEY        # any long random string
 npx wrangler deploy
+
+# Delete generated files after 7 days
+npx wrangler r2 bucket lifecycle add pdf-lib-workers expire-outputs outputs/ --expire-days 7
+npx wrangler r2 bucket lifecycle add pdf-lib-workers expire-extracted extracted/ --expire-days 7
 ```
 
-Optional:
+The two expiry rules cover where the API saves results by default: `outputs/` (`create`, `edit`, `merge`, `split`) and `extracted/` (`/pdf/extract`). Seven days matches the longest download link (`linkTtl` max), so a link and its file go away together. Files saved under a key or prefix you choose (e.g. `output.key: "invoices/42.pdf"`) and files you put in R2 yourself (templates, fonts) are kept. Check the rules with `npx wrangler r2 bucket lifecycle list pdf-lib-workers`; R2 deletes expired files within about a day of their expiry.
 
-- `npx wrangler secret put SIGNING_KEY` — a separate key for download links (defaults to `API_KEY`). Changing it voids all links already handed out.
-- Expire old outputs: `npx wrangler r2 bucket lifecycle add pdf-lib-workers expire-outputs outputs/ --expire-days 7`
+Optional: `npx wrangler secret put SIGNING_KEY` — a separate key for download links (defaults to `API_KEY`). Changing it voids all links already handed out.
 
 Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `npm test`.
 
@@ -75,7 +78,7 @@ Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `
 - The R2 bucket is private; files are only reachable through the Worker.
 - CORS is open (`*`), so browsers can call the API, but only with the key, so do that only from trusted internal tools.
 
-There are no upload, list or delete endpoints. Send inputs with each request. To keep reusable files in R2 (templates, fonts, logos) and refer to them by `key`, add them with the Cloudflare dashboard or `npx wrangler r2 object put pdf-lib-workers/<key> --file <path> --remote`. Remove old outputs with the lifecycle rule above.
+There are no upload, list or delete endpoints. Send inputs with each request. To keep reusable files in R2 (templates, fonts, logos) and refer to them by `key`, add them with the Cloudflare dashboard or `npx wrangler r2 object put pdf-lib-workers/<key> --file <path> --remote`. Generated results are removed by the expiry rules in [Setup](#setup).
 
 ## Configuration
 
@@ -126,7 +129,7 @@ If you leave out `source`, the single uploaded file (or the one in field `file`)
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `key` | `outputs/<uuid>.pdf` | Where to save in R2 (overwrites an existing file) |
+| `key` | `outputs/<uuid>.pdf` | Where to save in R2 (overwrites an existing file). Files under `outputs/` and `extracted/` are deleted after 7 days; keys elsewhere are kept |
 | `filename` | `document.pdf` | Name offered when the PDF is opened or saved |
 | `return` | `json` | `json`: details and a link. `pdf`: the PDF bytes. |
 | `store` | `true` | Save to R2. With `false` and `return: json`, the PDF comes back as `base64`. |
@@ -409,7 +412,7 @@ curl -s -H "$H" -H "$J" "$API/pdf/edit" -d '{
     { "op": "pageNumbers", "format": "Page {page} of {total}" },
     { "op": "encrypt", "ownerPassword": "s3cret", "permissions": { "copying": false } }
   ],
-  "output": { "key": "outputs/in-stamped.pdf" }
+  "output": { "key": "stamped/in.pdf" }
 }'
 
 # See a form's fields, then fill and flatten it (non-Latin names need a font)
@@ -536,6 +539,7 @@ curl -s -H "$H" -H "$J" "$API/pdf/edit" -d "{\"source\":\"$KEY\",\"operations\":
 - Workers have 128 MB memory and the whole PDF is held in memory, so stay well under ~50 MB per file.
 - Request bodies are capped by your Cloudflare plan (100 MB on Free/Pro). For large files, pass a URL, or put the file in R2 (dashboard or wrangler) and pass `{ "key": … }`.
 - Custom fonts add a few seconds per request (subsetting).
+- Some sites refuse requests from Cloudflare Workers, whatever the headers (w3.org, for example, returns 403 to the Worker but serves browsers). The error names the URL; send those files as uploads or base64 instead.
 - Opening a locked PDF with its password always saves it unlocked; add `encrypt` to lock the result again.
 
 Not supported (the library can't do these either):
