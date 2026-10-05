@@ -17,22 +17,36 @@ A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.c
 | **Split** a PDF into parts (every N pages, or ranges) | `POST /pdf/split` |
 | **Extract**, **reorder**, **reverse** or **repeat** pages | `selectPages` |
 | **Delete**, **add** blank, **duplicate**, **insert** pages (from another PDF or an image) | `removePages`, `addPage`, `duplicatePage`, `insertPdf` |
-| **Rotate**, **resize** (e.g. Letter → A4) or **crop** pages | `rotatePages`, `resizePages`, `cropPages` |
+| **Rotate**, **resize** (e.g. Letter → A4), **crop**, **scale** pages or **shift** their content | `rotatePages`, `resizePages`, `cropPages`, `scalePages`, `translateContent` |
+| Set print-production **page boxes** (bleed, trim, art) | `setPageBoxes` |
 | **Watermark** with text ("DRAFT", "CONFIDENTIAL") or a **logo** | `watermark` — centred or in a corner, any angle and opacity |
 | Add **page numbers** ("Page 3 of 10") | `pageNumbers` |
-| **Stamp** text, images, signatures, boxes, lines, SVG anywhere | `drawText`, `drawImage`, `drawRectangle`, `drawLine`, `drawSvg` |
+| **Stamp** text, images, signatures, boxes, circles, lines, SVG anywhere | `drawText`, `drawImage`, `drawRectangle`, `drawEllipse`, `drawLine`, `drawSvgPath`, `drawSvg` |
+| Styled text: **outlined**, **letter-spaced**, **skewed**, blend modes | `drawText` options |
+| Put a **letterhead** or **background** behind every page, or place another PDF's page anywhere (stamps, several pages on one sheet) | `drawPdfPage` (`behind: true` for backgrounds) |
 | **Fill a form** (text, checkboxes, dropdowns, radios), optionally **flatten** it | `fillForm`, `flattenForm`; list the fields first with `POST /pdf/info` |
 | Fill a PDF **without form fields** (e.g. a scanned form) | `drawText` at coordinates |
+| **Create forms**: text boxes, checkboxes, dropdowns, lists, radio buttons, buttons | `addFormField` |
+| **Change fields** (read-only, required, max length, alignment, font size…), put an **image in a field**, **remove fields** | `setFieldProperties`, `fillForm` `images`, `removeFormFields` |
+| Read and change **JavaScript** (document, form field, XFA), remove **XFA** | `POST /pdf/scripts`, `addJavaScript`, `setFieldScript`, `setXFAJavaScript`, `deleteXFA` |
 | Write **non-Latin text** (Cyrillic, Greek, CJK, …) | pass a TTF/OTF `font` to any text step |
 | Record **copyright**, **author**, **who it's for**, **where it came from**, any custom field | `setMetadata` (Info and XMP, read by Acrobat) |
 | **Password-protect** and restrict printing/copying/editing | `encrypt` |
-| **Open** password-protected PDFs | `"password"` on the source |
-| **Attach** files inside the PDF (CSV, XML, …) | `attachFile` |
+| **Open** password-protected PDFs, or **remove the password** | `"password"` on the source; the result is saved unlocked |
+| **Attach**, **extract** or **remove** files inside the PDF (CSV, XML, …) | `attachFile`, `POST /pdf/extract`, `detachFile` |
+| **Extract images** and **vector graphics** (as SVG) from pages | `POST /pdf/extract` |
+| Show or hide **layers** (optional content) | `setLayerVisibility` |
+| Control how viewers **open** the PDF (layout, full screen, title bar, print dialog defaults) | `setViewerPreferences` |
+| Make **PDF/A** archive files (1B–3U) | `convertToPDFA` |
+| Make **Factur-X / ZUGFeRD e-invoices** | `embedFacturX` |
+| **Edit signed PDFs** without breaking signatures (append-only save) | `POST /pdf/edit` with `incremental: true` |
+| **Measure text** (width, wrapping, size to fit) before laying it out | `POST /text/measure` |
 | **Create** a PDF from scratch | `POST /pdf/create` plus drawing steps |
-| **Read** page count, sizes, metadata, form fields, attachments | `POST /pdf/info` |
+| **Read** page count, sizes, boxes, metadata, form fields, layers, viewer settings, attachments, PDF/A level | `POST /pdf/info` |
 | **Extract text** (per page, optionally with positions and fonts) | `POST /pdf/text` |
 | **Chain** calls: feed one result into the next | pass the returned `key` or `url` as a source |
 | Get the result as a **link**, the **raw PDF**, or **base64** | `output.return`, `output.store` |
+| Write PDFs **old tools** can read (classic cross-reference table) | `output.useObjectStreams: false` |
 
 Every PDF-producing endpoint (`create`, `edit`, `merge`) takes the same `operations` list, run in order, so one request can stitch, watermark, number, tag and lock a document.
 
@@ -87,10 +101,10 @@ Anywhere the API takes a file (PDF, image, font, attachment), give it one of:
 | `"data:application/pdf;base64,…"` or `{ "base64": "JVBERi0…" }` | The bytes inline |
 | `{ "upload": "a" }` | A file sent in the same multipart request, by field name or file name |
 
-- PDF sources also take `"password"` for encrypted files.
+- PDF sources also take `"password"` for encrypted files (the result is saved without a password unless you add `encrypt`), and `"preserveXFA": true` to keep XFA form data, which form operations otherwise drop.
 - Merge sources also take `"pages"`, and, for images, `"size"` and `"margin"`.
 - **Images:** a PNG or JPEG works wherever a PDF source does in `/pdf/merge` and `insertPdf`, and becomes one page. It is fitted on A4 (turned landscape when wide), or set `"size": "Letter"`, `[w, h]` or `"image"` (page = image size, 1 px = 1 pt), plus `"margin"` in points. Phone photos are turned upright using their EXIF orientation.
-- Font fields need the object form, since a bare string there is a font name.
+- Font fields need the object form, since a bare string there is a font name. Font files may be TTF, OTF, or a `.ttc`/`.dfont` collection with `"postscriptName"` naming the face.
 - URL downloads follow redirects and stop after `FETCH_TIMEOUT_MS` or `MAX_FETCH_BYTES`. Errors name the bad input, e.g. `sources[1]: https://… returned HTTP 404` or `Not a PDF (starts with "<!DOCTYPE html>…")`.
 - Links this API returned are read straight from R2, so outputs can feed later calls.
 
@@ -117,6 +131,7 @@ If you leave out `source`, the single uploaded file (or the one in field `file`)
 | `return` | `json` | `json`: details and a link. `pdf`: the PDF bytes. |
 | `store` | `true` | Save to R2. With `false` and `return: json`, the PDF comes back as `base64`. |
 | `linkTtl` | `SIGNED_URL_TTL` | Link lifetime in seconds, up to 604800 (7 days) |
+| `useObjectStreams` | `true` | `false` writes a classic cross-reference table (larger file, readable by old tools) |
 
 JSON reply:
 
@@ -135,32 +150,46 @@ Download a stored result with `GET /files/<key>` (with the key) or its signed `u
 | --- | --- | --- |
 | `GET /` | | Lists endpoints and operations (no auth) |
 | `GET /files/<key>` | | Download a result |
-| `POST /pdf/info` | `{ source }` | Page sizes, rotation, metadata, form fields, attachments |
+| `POST /pdf/info` | `{ source }` | Everything about a PDF except its content |
 | `POST /pdf/text` | `{ source, pages?, items? }` | Text per page |
+| `POST /pdf/extract` | `{ source, pages?, include?, store? (true), prefix?, linkTtl? }` | Images, vector graphics, text, attachments |
+| `POST /pdf/scripts` | `{ source }` | Document, form field, page and XFA JavaScript |
 | `POST /pdf/create` | `{ size? ("A4"), pageCount? (1, max 1000), operations?, output? }` | New PDF |
-| `POST /pdf/edit` | `{ source, operations, output? }` | Run operations on a PDF |
+| `POST /pdf/edit` | `{ source, operations, incremental? (false), output? }` | Run operations on a PDF |
 | `POST /pdf/merge` | `{ sources (max 200), operations?, output? }` | Join PDFs and images, then run operations |
 | `POST /pdf/split` | `{ source, ranges? \| every? (1), prefix?, linkTtl? }` | One R2 file per part |
+| `POST /text/measure` | `{ text, font? ("Helvetica"), size? (12), maxWidth?, wordBreaks?, lineHeight?, fitHeight? }` | Text width, height, wrapped lines |
+
+`incremental: true` keeps the original file byte-for-byte and appends the changes, so existing digital signatures stay valid (viewers then show the changes as made after signing).
 
 `create` with `pageCount: 0` starts empty; add pages with `addPage`. A request may hold up to 500 operations.
 
 ### `/pdf/info` reply
 
 ```json
-{ "pageCount": 2, "encrypted": false,
+{ "pageCount": 2, "encrypted": false, "pdfA": "3B", "hasJavaScript": false,
   "metadata": { "title": "Q3 report", "author": "Acme", "subject": null, "keywords": null,
                 "creator": null, "producer": "…", "language": null,
                 "creationDate": "…", "modificationDate": "…",
                 "copyright": "© 2026 Acme", "copyrightUrl": null, "custom": { "MadeFor": "Client X" } },
-  "pages": [{ "page": 1, "width": 612, "height": 792, "rotation": 0 }],
-  "form": { "fields": [
-    { "name": "name", "type": "text", "value": "Ada" },
-    { "name": "agree", "type": "checkbox", "value": true },
-    { "name": "color", "type": "dropdown", "value": ["green"], "options": ["red", "green"] } ] },
-  "attachments": [{ "name": "data.csv", "size": 120, "mimeType": "text/csv", "description": null }] }
+  "pages": [{ "page": 1, "width": 612, "height": 792, "rotation": 0,
+              "boxes": { "mediaBox": { "x": 0, "y": 0, "width": 612, "height": 792 }, "cropBox": {…}, "bleedBox": {…}, "trimBox": {…}, "artBox": {…} } }],
+  "form": {
+    "hasXFA": false,
+    "fields": [
+      { "name": "name", "type": "text", "value": "Ada",
+        "settings": { "readOnly": false, "required": true, "exported": true, "multiline": false, "maxLength": 40, "alignment": "left", "password": false, "comb": false } },
+      { "name": "agree", "type": "checkbox", "value": true, "settings": { "checked": true, … } },
+      { "name": "color", "type": "dropdown", "value": ["green"], "options": ["red", "green"], "settings": { "editable": false, "multiselect": false, "sort": false, … } } ],
+    "signatureFields": [{ "name": "Signature1", "source": "acroform" }] },
+  "layers": [{ "name": "Draft marks", "visible": true }],
+  "viewerPreferences": { "pageMode": "UseOutlines", "pageLayout": null, "displayDocTitle": true, "duplex": null, "printPageRange": [], "numCopies": 1, … },
+  "attachments": [{ "name": "data.csv", "size": 120, "mimeType": "text/csv", "description": null, "relationship": "Data" }] }
 ```
 
-Field types: `text`, `checkbox`, `dropdown`, `optionList`, `radio`, plus `button` and `signature` (listed, not fillable).
+Field types: `text`, `checkbox`, `dropdown`, `optionList`, `radio`, `button`, `signature`. Signature fields are listed but can't be filled or signed.
+
+A locked PDF sent without its password returns only `{ "pageCount", "encrypted": true, "needsPassword": true, "pages" }`.
 
 ### `/pdf/text` reply
 
@@ -178,6 +207,38 @@ Field types: `text`, `checkbox`, `dropdown`, `optionList`, `radio`, plus `button
 ```
 
 `ranges` gives one part per entry (`["1-3", "4-last"]`, `["odd", "even"]`); otherwise parts of `every` pages. Up to 1000 parts.
+
+### `/pdf/extract` reply
+
+```json
+{ "pages": [{ "page": 1,
+              "text": "…",
+              "images": [{ "mimeType": "image/png", "width": 800, "height": 600, "x": 50, "y": 400, "drawWidth": 200, "drawHeight": 150,
+                           "key": "extracted/<uuid>/page-1-image-1.png", "url": "…", "expiresAt": "…" }],
+              "graphics": [{ "x": 40, "y": 300, "width": 200, "height": 80, "svg": "<svg …>…</svg>" }] }],
+  "attachments": [{ "name": "data.csv", "mimeType": "text/csv", "description": null, "size": 120, "key": "…", "url": "…", "expiresAt": "…" }] }
+```
+
+`include` picks any of `images`, `graphics`, `text`, `attachments` (default: images and attachments). Files go to R2 under `prefix` (default `extracted/<uuid>/`), or come back as `base64` with `"store": false`. Images come out as PNG or JPEG; vector graphics are approximated as SVG.
+
+### `/pdf/scripts` reply
+
+```json
+{ "document": [{ "name": "init", "script": "…" }],
+  "fields": [{ "field": "total", "event": "calculate", "script": "…" }],
+  "pages": [{ "page": 1, "event": "pageOpen", "script": "…" }],
+  "xfa": [{ "field": "ImportButton", "event": "event__click", "script": "…" }] }
+```
+
+### `/text/measure` reply
+
+```json
+{ "width": 152.3, "height": 13.9, "ascent": 10.9, "blockHeight": 28.3,
+  "lines": [{ "text": "Hello world, this", "width": 92.1 }, { "text": "is a long line", "width": 76.7 }],
+  "sizeForHeight": 22.1 }
+```
+
+`font` is a standard font name or a font source. With `maxWidth`, text wraps at `wordBreaks` (default spaces); `\n` always breaks. `sizeForHeight` appears when `fitHeight` is given.
 
 ### Shared formats
 
@@ -205,18 +266,28 @@ Run in order, each `{ "op": "<name>", … }`. Errors name the failing step, e.g.
 | `resizePages` | `pages`, `size`, `scaleContent` (true) | `true` shrinks/grows content to fit and centres it; `false` only changes the paper size |
 | `cropPages` | `pages`, `x`, `y`, `width`, `height` | Sets the visible area; hidden content is still in the file |
 | `insertPdf` | `source` (PDF or image), `pages`, `at` (end), `size`/`margin` (images) | |
+| `setPageBoxes` | `pages`, `mediaBox`, `cropBox`, `bleedBox`, `trimBox`, `artBox` (each `{ x, y, width, height }`) | Media = paper size; bleed/trim/art for print production |
+| `scalePages` | `pages`, `factor` (number or `[x, y]`), `target` (`page`) | `page` scales size, content and fields; `content` or `annotations` scale only those |
+| `translateContent` | `pages`, `x`, `y` | Shifts everything drawn on the page |
 
 ### Drawing
 
 | op | Fields (defaults) |
 | --- | --- |
-| `drawText` | `pages`, `text` (`\n` for new lines), `x`, `y`, `origin`, `size` (12), `font` (Helvetica), `color` (#000000), `opacity`, `rotate` (degrees), `maxWidth` (wraps), `lineHeight` (1.2 × size) |
-| `drawImage` | `pages`, `image` (PNG/JPEG source), `x`, `y`, `origin`, `width`/`height` (one keeps the aspect ratio; neither = 1 px per pt), `opacity`, `rotate` |
-| `drawRectangle` | `pages`, `x`, `y`, `origin`, `width`, `height`, `color` (fill), `borderColor`, `borderWidth`, `opacity`, `rotate` |
-| `drawLine` | `pages`, `start {x,y}`, `end {x,y}`, `origin`, `thickness` (1), `color` (#000000), `opacity` |
-| `drawSvg` | `pages`, `svg` (markup), `x`, `y` (top-left corner of the SVG), `origin`, `width`, `height` |
-| `watermark` | `pages`, `text` **or** `image`, `position` (`center`, `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`), `margin` (24), `opacity` (0.25), `rotate` (45 text, 0 image); text: `size` (60), `font` (Helvetica-Bold), `color` (#888888); image: `scale` (0.5 × page width) |
+| `drawText` | `pages`, `text` (`\n` for new lines), `x`, `y`, `origin`, `size` (12), `font` (Helvetica), `color` (#000000), `opacity`, `rotate`, `xSkew`, `ySkew`, `maxWidth` (wraps), `lineHeight` (1.2 × size), `wordBreaks` (spaces), `characterSpacing`, `renderMode` (`fill`, `outline`, `fillAndOutline`, `invisible`), `strokeColor`, `strokeWidth`, `blendMode` |
+| `drawImage` | `pages`, `image` (PNG/JPEG source), `x`, `y`, `origin`, `width`/`height` (one keeps the aspect ratio; neither = 1 px per pt), `opacity`, `rotate`, `xSkew`, `ySkew`, `blendMode` |
+| `drawRectangle` | `pages`, `x`, `y`, `origin`, `width`, `height`, `rx`/`ry` (rounded corners), `rotate`, `xSkew`, `ySkew`, + shape style |
+| `drawEllipse` | `pages`, `x`, `y` (centre), `origin`, `xRadius`, `yRadius` (= xRadius: a circle), `rotate`, + shape style |
+| `drawLine` | `pages`, `start {x,y}`, `end {x,y}`, `origin`, `thickness` (1), `color` (#000000), `opacity`, `lineCap` (`butt`, `round`, `projecting`), `dashArray`, `dashPhase`, `blendMode` |
+| `drawSvgPath` | `pages`, `path` (SVG path data; its y axis points down from `x`,`y`), `x`, `y`, `origin`, `scale`, `rotate`, `fillRule` (`nonzero`, `evenodd`), + shape style (fills black if no colour or border is given) |
+| `drawSvg` | `pages`, `svg` (markup), `x`, `y` (top-left corner of the SVG), `origin`, `width`, `height`, `fontSize`, `fonts` (`{ "family-name": font }` for SVG text), `blendMode` |
+| `drawPdfPage` | `pages`, `source` (PDF), `page` (1), `clip` (`{ left, bottom, right, top }` of the source page), `x` (0), `y` (0), `origin`, `width`/`height`/`scale`, `opacity`, `rotate`, `xSkew`, `ySkew`, `blendMode`, `behind` (false: on top; true: under the existing content, e.g. a letterhead) |
+| `watermark` | `pages`, `text` **or** `image`, `position` (`center`, `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`), `margin` (24), `opacity` (0.25), `rotate` (45 text, 0 image), `blendMode`; text: `size` (60), `font` (Helvetica-Bold), `color` (#888888); image: `scale` (0.5 × page width) |
 | `pageNumbers` | `pages`, `format` (`"{page} / {total}"`), `position` (bottom-center; same corners as watermark, no centre), `margin` (24), `size` (10), `font`, `color`, `startAt` (1) |
+
+**Shape style** (rectangles, ellipses, SVG paths): `color` (fill), `opacity`, `borderColor`, `borderWidth` (1 when a border colour is given), `borderOpacity`, `borderDashArray` (e.g. `[6, 3]`), `borderDashPhase`, `borderLineCap`, `blendMode`.
+
+**Blend modes**: `Normal`, `Multiply`, `Screen`, `Overlay`, `Darken`, `Lighten`, `ColorDodge`, `ColorBurn`, `HardLight`, `SoftLight`, `Difference`, `Exclusion`. **Rotation and skew** are in degrees.
 
 `font` is a standard font (`Helvetica`, `Helvetica-Bold`, `Helvetica-Oblique`, `Helvetica-BoldOblique`, `Times-Roman`, `Times-Bold`, `Times-Italic`, `Times-BoldItalic`, `Courier`, `Courier-Bold`, `Courier-Oblique`, `Courier-BoldOblique`, `Symbol`, `ZapfDingbats`) or a TTF/OTF source in object form. Standard fonts only cover Latin text; use a font file for anything else. If a font lacks a character, the request fails and names the characters, rather than printing `?`. Font files are subset, so only used glyphs are embedded.
 
@@ -224,18 +295,43 @@ Run in order, each `{ "op": "<name>", … }`. Errors name the failing step, e.g.
 
 | op | Fields (defaults) |
 | --- | --- |
-| `fillForm` | `fields { name: value }`, `flatten` (false), `strict` (true: unknown names fail), `font` (Helvetica) |
+| `fillForm` | `fields { name: value }`, `images { name: image source }` (text fields and buttons), `imageAlignment`, `flatten` (false), `strict` (true: unknown names fail), `font` (Helvetica) |
 | `flattenForm` | `font` |
+| `addFormField` | `type` (`text`, `checkbox`, `dropdown`, `optionList`, `radio`, `button`), `name`, `page` (1), `x`, `y`, `width`, `height`, `origin`, `value`, `options` (dropdown/list choices), `choices` (radio: `[{ value, page?, x, y, width, height }]`), `label` (button), `font`, `textColor`, `backgroundColor`, `borderColor`, `borderWidth`, `rotate`, `hidden`, + field settings |
+| `setFieldProperties` | `name`, + field settings, `image` + `imageAlignment` (text fields and buttons), `font` (to redraw it) |
+| `removeFormFields` | `names` |
+| `setFieldScript` | `name`, `event` (`keystroke`, `format`, `validate`, `calculate`, `mouseUp`, `mouseDown`, `mouseEnter`, `mouseExit`, `focus`, `blur`), `script` — replaces an existing script (see `/pdf/scripts`); the library can't add new ones |
 
-Values: text fields take a string; checkboxes `true`/`false`; dropdowns and option lists an option or an array of options; radio groups an option. Buttons and signature fields can't be filled; stamp a signature image with `drawImage`. Flattening turns fields into plain page content so they can no longer be edited. Find field names with `/pdf/info`.
+**Field settings**: `readOnly`, `required`, `exported` (false: left out of form submissions); text: `multiline`, `maxLength` (null removes), `alignment` (`left`, `center`, `right`), `fontSize` (0 = auto), `password`, `comb` (one character per box; needs `maxLength`), `spellCheck`, `scroll`, `richText`, `fileSelect`; dropdowns and lists: `options`, `editable` (dropdown), `sort`, `multiselect`, `selectOnClick`, `fontSize`; radios: `offToggle` (clicking the chosen option clears it), `mutuallyExclusive`; buttons: `fontSize`. A setting that doesn't fit the field's type is an error.
+
+Values: text fields take a string; checkboxes `true`/`false`; dropdowns and option lists an option or an array of options; radio groups an option. Flattening turns fields into plain page content so they can no longer be edited. Find field names and settings with `/pdf/info`.
+
+### Scripts
+
+| op | Fields |
+| --- | --- |
+| `addJavaScript` | `name`, `script` — document-level, runs when the PDF opens (in viewers that allow it) |
+| `setXFAJavaScript` | `field`, `event`, `script` — needs `"preserveXFA": true` on the source |
+| `deleteXFA` | — removes XFA data, leaving the regular form fields |
+
+XFA support targets static government/tax forms; dynamic XFA isn't regenerated.
 
 ### Document
 
 | op | Fields (defaults) |
 | --- | --- |
-| `setMetadata` | `title`, `author`, `subject`, `keywords[]`, `creator`, `producer`, `language`, `copyright`, `copyrightUrl`, `custom { Key: "value" \| null }` |
-| `attachFile` | `file` (source), `name`, `mimeType`, `description` |
-| `encrypt` | `ownerPassword`, `userPassword` (empty: opens without a password, permissions still apply), `algorithm` (`AES-256` or `AES-128`), `permissions` |
+| `setMetadata` | `title`, `showTitleInWindow`, `author`, `subject`, `keywords[]`, `creator`, `producer`, `language`, `creationDate`, `modificationDate` (ISO dates; modification defaults to now), `copyright`, `copyrightUrl`, `custom { Key: "value" \| null }` |
+| `setViewerPreferences` | `pageMode` (`UseNone`, `UseOutlines`, `UseThumbs`, `FullScreen`, `UseOC`, `UseAttachments`), `pageLayout` (`SinglePage`, `OneColumn`, `TwoColumnLeft`, `TwoColumnRight`, `TwoPageLeft`, `TwoPageRight`), `hideToolbar`, `hideMenubar`, `hideWindowUI`, `fitWindow`, `centerWindow`, `displayDocTitle`, `nonFullScreenPageMode`, `readingDirection` (`L2R`, `R2L`), `printScaling` (`None`, `AppDefault`), `duplex` (`Simplex`, `DuplexFlipShortEdge`, `DuplexFlipLongEdge`), `pickTrayByPDFSize`, `printPageRange` (pages), `numCopies` (1–5) |
+| `setLayerVisibility` | `layers: [{ name, visible }]` |
+| `attachFile` | `file` (source), `name`, `mimeType`, `description`, `creationDate`, `modificationDate`, `relationship` (`Source`, `Data`, `Alternative`, `Supplement`, `EncryptedPayload`, `Schema`, `Unspecified`) |
+| `detachFile` | `name` |
+| `convertToPDFA` | `conformance` (`1B`, `2B`, `2U`, `3B` default, `3U`), `iccProfile` (source; default sRGB), `outputConditionIdentifier`, `colorComponents` (1, 3, 4) |
+| `embedFacturX` | `xml` (source: your Factur-X/ZUGFeRD invoice XML), `conformanceLevel` (`MINIMUM`, `BASIC WL`, `BASIC`, `EN 16931`, `EXTENDED`, `XRECHNUNG`), `fileName`, `version`, `documentType`, `description` |
+| `encrypt` | `ownerPassword`, `userPassword` (empty: opens without a password, permissions still apply), `algorithm` (`AES-256`, `AES-128`, or `RC4-128`/`RC4-40` with `allowWeakCryptography: true`), `permissions` |
+
+**PDF/A**: `convertToPDFA` adds what the standard requires around the content (colour profile, file ID, XMP). It doesn't rewrite content: text must use an embedded font file (the built-in fonts aren't allowed) and the PDF mustn't be encrypted. Check results with a validator such as veraPDF. Run `setMetadata` before `convertToPDFA` so copyright and custom fields are carried into the PDF/A metadata.
+
+**Factur-X**: `embedFacturX` attaches the invoice XML and makes the file PDF/A-3. It doesn't create or check the XML; pass a complete one from your invoicing system.
 
 `permissions`: `printing` (`true`, `false`, `"lowResolution"`, `"highResolution"`), `modifying`, `copying`, `annotating`, `fillingForms`, `contentAccessibility`, `documentAssembly`. Everything is allowed unless set to `false`. Put `encrypt` last; steps after it still apply, and encryption happens on save.
 
@@ -369,6 +465,64 @@ curl -s -H "$H" -H "$J" "$API/pdf/edit" -d '{
 # Open a locked PDF, read its text
 curl -s -H "$H" -H "$J" "$API/pdf/text" -d '{ "source": { "url": "https://example.com/locked.pdf", "password": "s3cret" } }'
 
+# Remove a password (any edit saves the result unlocked)
+curl -s -H "$H" -H "$J" "$API/pdf/edit" -d '{
+  "source": { "url": "https://example.com/locked.pdf", "password": "s3cret" },
+  "operations": [{ "op": "setMetadata" }]
+}'
+
+# Letterhead behind every page of a report
+curl -s -H "$H" -H "$J" "$API/pdf/edit" -d '{
+  "source": "https://example.com/report.pdf",
+  "operations": [{ "op": "drawPdfPage", "source": "templates/letterhead.pdf", "behind": true }]
+}'
+
+# Two pages side by side on one landscape sheet (2-up)
+curl -s -H "$H" -H "$J" "$API/pdf/create" -d '{
+  "size": [842, 595], "operations": [
+    { "op": "drawPdfPage", "source": "https://example.com/a.pdf", "page": 1, "x": 0,   "y": 0, "width": 421, "height": 595 },
+    { "op": "drawPdfPage", "source": "https://example.com/a.pdf", "page": 2, "x": 421, "y": 0, "width": 421, "height": 595 }
+  ]
+}'
+
+# Build a fillable form
+curl -s -H "$H" -H "$J" "$API/pdf/create" -d '{
+  "operations": [
+    { "op": "drawText", "text": "Name", "x": 50, "y": 95, "origin": "top-left" },
+    { "op": "addFormField", "type": "text", "name": "name", "x": 120, "y": 80, "width": 250, "height": 24, "origin": "top-left", "required": true, "borderColor": "#888888" },
+    { "op": "addFormField", "type": "dropdown", "name": "country", "x": 120, "y": 120, "width": 150, "height": 24, "origin": "top-left", "options": ["FR", "UK", "US"], "borderColor": "#888888" },
+    { "op": "addFormField", "type": "radio", "name": "plan", "origin": "top-left", "value": "basic",
+      "choices": [{ "value": "basic", "x": 120, "y": 160, "width": 14, "height": 14 }, { "value": "pro", "x": 200, "y": 160, "width": 14, "height": 14 }] },
+    { "op": "addFormField", "type": "checkbox", "name": "terms", "x": 120, "y": 200, "width": 14, "height": 14, "origin": "top-left" }
+  ]
+}'
+
+# Pull every image and attachment out of a PDF
+curl -s -H "$H" -H "$J" "$API/pdf/extract" -d '{ "source": "https://example.com/brochure.pdf", "include": ["images", "attachments"] }'
+
+# Archive as PDF/A-2B with an embedded font
+curl -s -H "$H" -H "$J" "$API/pdf/create" -d '{
+  "operations": [
+    { "op": "drawText", "text": "Board minutes", "x": 72, "y": 72, "origin": "top-left", "size": 20, "font": { "key": "fonts/NotoSans-Regular.ttf" } },
+    { "op": "setMetadata", "title": "Board minutes", "copyright": "© 2026 Acme" },
+    { "op": "convertToPDFA", "conformance": "2B" }
+  ]
+}'
+
+# Factur-X e-invoice from your invoice PDF and XML
+curl -s -H "$H" "$API/pdf/edit" -F file=@invoice.pdf -F xml=@factur-x.xml -F 'options={
+  "operations": [{ "op": "embedFacturX", "xml": { "upload": "xml" }, "conformanceLevel": "EN 16931" }]
+}'
+
+# Add a stamp to a signed PDF without breaking the signature
+curl -s -H "$H" -H "$J" "$API/pdf/edit" -d '{
+  "source": "https://example.com/signed.pdf", "incremental": true,
+  "operations": [{ "op": "drawText", "text": "Received 2026-10-05", "x": 400, "y": 30 }]
+}'
+
+# How wide is this text, and where does it wrap?
+curl -s -H "$H" -H "$J" "$API/text/measure" -d '{ "text": "Quarterly report for Acme Inc.", "font": "Helvetica-Bold", "size": 18, "maxWidth": 200 }'
+
 # Text of a local file (raw body)
 curl -s -H "$H" -H 'Content-Type: application/pdf' --data-binary @in.pdf "$API/pdf/text"
 
@@ -382,12 +536,13 @@ curl -s -H "$H" -H "$J" "$API/pdf/edit" -d "{\"source\":\"$KEY\",\"operations\":
 - Workers have 128 MB memory and the whole PDF is held in memory, so stay well under ~50 MB per file.
 - Request bodies are capped by your Cloudflare plan (100 MB on Free/Pro). For large files, pass a URL, or put the file in R2 (dashboard or wrangler) and pass `{ "key": … }`.
 - Custom fonts add a few seconds per request (subsetting).
+- Opening a locked PDF with its password always saves it unlocked; add `encrypt` to lock the result again.
 
-Not supported:
+Not supported (the library can't do these either):
 
-- **Removing a password.** Editing a locked PDF keeps it locked.
 - **Redaction.** `cropPages` and drawing a box over content only hide it; the original stays in the file.
 - **Rendering pages to images**, **OCR** of scans, **compressing** or optimising PDFs.
-- **Digital signatures** (cryptographic). A signature image can be stamped with `drawImage`.
-- **XFA forms** (an older Adobe format) may not fill correctly.
+- **Creating digital signatures** (cryptographic). `incremental: true` keeps existing ones valid; a signature image can be stamped with `drawImage`.
+- **Bookmarks/outlines, links, comments and other annotations** (beyond form fields).
+- **Dynamic XFA forms**; static XFA is supported as described above.
 - **Images** other than PNG and JPEG (convert WebP, HEIC, TIFF first).

@@ -52,15 +52,22 @@ function shorthand(v: unknown) {
 
 /** Object form only, for fields where a bare string means something else (fonts). */
 export const FileSource = source({});
+/** A TTF/OTF/TTC font file; `postscriptName` picks a face from a .ttc/.dfont collection. */
+export const FontSource = source({ postscriptName: z.string().optional() });
 export const Source = z.preprocess(shorthand, FileSource);
 export type Source = z.infer<typeof FileSource>;
 
 /** A PDF source, optionally with the password needed to open it. */
-export const PdfSource = z.preprocess(shorthand, source({ password: z.string().optional() }));
+const pdfOptions = {
+  password: z.string().optional(),
+  /** Keep XFA form data (dynamic Adobe forms); otherwise form operations remove it. */
+  preserveXFA: z.boolean().optional(),
+};
+export const PdfSource = z.preprocess(shorthand, source(pdfOptions));
 export type PdfSource = z.infer<typeof PdfSource>;
 
 /** A PDF (optionally limited to some pages) or a PNG/JPEG image to merge. */
-export const MergeSource = z.preprocess(shorthand, source({ password: z.string().optional(), pages: PageSpec.optional(), ...ImagePageOptions }));
+export const MergeSource = z.preprocess(shorthand, source({ ...pdfOptions, pages: PageSpec.optional(), ...ImagePageOptions }));
 
 export const R2Key = z
   .string()
@@ -80,6 +87,8 @@ export const Output = z
     store: z.boolean().default(true),
     /** Lifetime of the signed link, in seconds. */
     linkTtl: z.number().int().positive().max(7 * 24 * 3600).optional(),
+    /** Pack objects into compressed streams (smaller files). false = PDF 1.4-style output for old tools. */
+    useObjectStreams: z.boolean().default(true),
   })
-  .default({ return: "json", store: true });
+  .default({ return: "json", store: true, useObjectStreams: true });
 export type Output = z.infer<typeof Output>;

@@ -1,58 +1,9 @@
-import { PDFDocument, StandardFonts } from "@cantoo/pdf-lib";
-import { env, exports } from "cloudflare:workers";
+import { PDFDocument } from "@cantoo/pdf-lib";
+import { env } from "cloudflare:workers";
 import { readXmp } from "../src/metadata";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { BASE, PNG, b64, bucket, call, download, formPdf, json, pageTexts, post, samplePdf, worker } from "./helpers";
 
-const worker = (exports as unknown as { default: Fetcher }).default;
-const bucket = (env as unknown as { PDF_BUCKET: R2Bucket }).PDF_BUCKET;
-const AUTH = { authorization: "Bearer test-key" };
-const BASE = "https://pdf.test";
-
-function call(path: string, init: RequestInit = {}) {
-  return worker.fetch(new Request(BASE + path, { ...init, headers: { ...AUTH, ...(init.headers as Record<string, string>) } }));
-}
-async function post(path: string, body: unknown) {
-  return call(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-}
-async function json<T = any>(res: Response | Promise<Response>): Promise<T> {
-  const r = await res;
-  const body = await r.json();
-  if (!r.ok) throw new Error(`${r.status}: ${JSON.stringify(body)}`);
-  return body as T;
-}
-async function download(url: string) {
-  const res = await worker.fetch(new Request(url));
-  expect(res.status).toBe(200);
-  return new Uint8Array(await res.arrayBuffer());
-}
-function b64(bytes: Uint8Array) {
-  return btoa(String.fromCharCode(...bytes));
-}
-
-const pageTexts = async (key: string) => (await json(post("/pdf/text", { source: key }))).pages.map((p: any) => p.text);
-
-/** A PDF with `n` pages, each saying "<label> i". */
-async function samplePdf(n = 3, label = "Page", size: [number, number] = [612, 792]) {
-  const doc = await PDFDocument.create();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  for (let i = 1; i <= n; i++) doc.addPage(size).drawText(`${label} ${i}`, { x: 50, y: 700, size: 24, font });
-  return doc.save();
-}
-
-async function formPdf() {
-  const doc = await PDFDocument.create();
-  const page = doc.addPage([612, 792]);
-  const form = doc.getForm();
-  form.createTextField("name").addToPage(page, { x: 50, y: 700, width: 200, height: 24 });
-  form.createCheckBox("agree").addToPage(page, { x: 50, y: 650, width: 20, height: 20 });
-  const dd = form.createDropdown("color");
-  dd.addOptions(["red", "green"]);
-  dd.addToPage(page, { x: 50, y: 600, width: 100, height: 24 });
-  return doc.save();
-}
-
-// 1x1 red PNG
-const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 describe("auth", () => {
   it("serves the index without a key", async () => {
@@ -131,7 +82,7 @@ describe("pdf", () => {
   it("reports info for a raw PDF body", async () => {
     const info = await json(call("/pdf/info", { method: "POST", headers: { "content-type": "application/pdf" }, body: await samplePdf(3) }));
     expect(info.pageCount).toBe(3);
-    expect(info.pages[2]).toEqual({ page: 3, width: 612, height: 792, rotation: 0 });
+    expect(info.pages[2]).toMatchObject({ page: 3, width: 612, height: 792, rotation: 0, boxes: { cropBox: { x: 0, y: 0, width: 612, height: 792 } } });
   });
 
   it("edits pages: select, remove, rotate, resize, watermark, numbers", async () => {
@@ -205,7 +156,7 @@ describe("pdf", () => {
 
     const filled = await json(post("/pdf/edit", { source: src, operations: [{ op: "fillForm", fields: { name: "Ada", agree: true, color: "green" } }] }));
     const after = await json(post("/pdf/info", { source: { key: filled.key } }));
-    expect(after.form.fields).toEqual([
+    expect(after.form.fields).toMatchObject([
       { name: "name", type: "text", value: "Ada" },
       { name: "agree", type: "checkbox", value: true },
       { name: "color", type: "dropdown", value: ["green"], options: ["red", "green"] },
@@ -245,8 +196,9 @@ describe("pdf", () => {
         operations: [{ op: "encrypt", ownerPassword: "owner", userPassword: "user", permissions: { copying: false } }],
       }),
     );
-    const locked = await post("/pdf/info", { source: { key: enc.key } });
-    expect(locked.status).toBe(422);
+    const locked = await json(post("/pdf/info", { source: { key: enc.key } }));
+    expect(locked).toMatchObject({ encrypted: true, needsPassword: true, pageCount: 1 });
+    expect((await post("/pdf/text", { source: { key: enc.key } })).status).toBe(422);
     const info = await json(post("/pdf/info", { source: { key: enc.key, password: "user" } }));
     expect(info.pageCount).toBe(1);
     const text = await json(post("/pdf/text", { source: { key: enc.key, password: "owner" } }));
@@ -261,7 +213,7 @@ describe("pdf", () => {
       }),
     );
     const info = await json(post("/pdf/info", { source: { key: out.key } }));
-    expect(info.attachments).toEqual([{ name: "note.txt", size: 5, mimeType: "text/plain", description: null }]);
+    expect(info.attachments).toEqual([{ name: "note.txt", size: 5, mimeType: "text/plain", description: null, relationship: null }]);
   });
 
   it("returns PDF bytes or base64 instead of a link", async () => {

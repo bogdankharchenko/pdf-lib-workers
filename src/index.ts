@@ -1,16 +1,16 @@
-import { PDFDocument } from "@cantoo/pdf-lib";
+import { PDFDocument, StandardFonts, breakTextIntoLines } from "@cantoo/pdf-lib";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import type { Env } from "./env";
 import { HttpError, badRequest } from "./errors";
-import { documentInfo, extractText } from "./inspect";
-import { Editor, Operation, Operations, addSource } from "./operations";
+import { documentInfo, documentScripts, extractText, joinText, lockedInfo } from "./inspect";
+import { Editor, Operation, Operations, addSource, checkText, embedFontSpec } from "./operations";
 import { resolvePages } from "./pages";
-import { MergeSource, Output, PageSize, PageSpec, PdfSource, R2Key, pageSize } from "./schemas";
+import { FontSource, MergeSource, Output, PageSize, PageSpec, PdfSource, R2Key, pageSize } from "./schemas";
 import { signedUrl, timingSafeEqual, verifySignature } from "./signing";
 import { imageKind } from "./images";
-import { type Ctx, type Upload, assignRefs, findUpload, loadPdf, looksLikePdf, readAhead, readSource } from "./sources";
+import { type Ctx, type Upload, assignRefs, findUpload, loadPdf, looksLikePdf, openPdf, readAhead, readSource } from "./sources";
 
 type App = { Bindings: Env };
 type C = Context<App>;
@@ -108,8 +108,9 @@ async function readRequest(c: C): Promise<{ body: Record<string, unknown>; uploa
   return { body, uploads };
 }
 
-async function sendPdf(c: C, doc: PDFDocument, output: Output, extra: Record<string, unknown> = {}) {
-  const bytes = await doc.save();
+/** Saves `doc` (or appends to it, for incremental edits) and replies per `output`. */
+async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { incremental?: boolean } = {}) {
+  const bytes = opts.incremental ? await doc.commit({ useObjectStreams: output.useObjectStreams }) : await doc.save({ useObjectStreams: output.useObjectStreams });
   const filename = output.filename ?? "document.pdf";
   const disposition = `inline; filename="${filename.replace(/["\\\r\n]/g, "_")}"`;
   let key: string | undefined;
@@ -131,7 +132,6 @@ async function sendPdf(c: C, doc: PDFDocument, output: Output, extra: Record<str
     ...(key ? { key, url: link!.url, expiresAt: link!.expiresAt } : { base64: bytesToBase64(bytes) }),
     size: bytes.byteLength,
     pageCount: doc.getPageCount(),
-    ...extra,
   });
 }
 
@@ -170,12 +170,15 @@ app.get("/", (c) =>
       'A PDF, image, font or attachment can be a URL string, an R2 key string, { url, headers? }, { key }, { base64 }, or { upload } naming a multipart file by field or file name. Send files as multipart (plus an "options" JSON field) or as a raw body (plus ?options=).',
     endpoints: {
       "GET /files/:key": "Download a result (API key or the signed link it came with).",
-      "POST /pdf/info": "Page count, sizes, metadata, form fields, attachments: { source }",
+      "POST /pdf/info": "Pages, boxes, metadata, form fields, layers, viewer preferences, attachments: { source }",
       "POST /pdf/text": "Extract text: { source, pages?, items? }",
+      "POST /pdf/extract": "Extract images, vector graphics, text and attachments: { source, pages?, include?, store?, prefix? }",
+      "POST /pdf/scripts": "Document, XFA, field and page JavaScript: { source }",
       "POST /pdf/create": "New PDF: { size?, pageCount?, operations?, output? }",
-      "POST /pdf/edit": "Run operations on a PDF: { source, operations, output? }",
-      "POST /pdf/merge": "Join PDFs: { sources: [{ ...source, pages? }], operations?, output? }",
+      "POST /pdf/edit": "Run operations on a PDF: { source, operations, incremental?, output? }",
+      "POST /pdf/merge": "Join PDFs and images: { sources: [{ ...source, pages? }], operations?, output? }",
       "POST /pdf/split": "Split a PDF: { source, ranges? | every?, prefix? }",
+      "POST /text/measure": "Width/height of text in a font: { text, font?, size?, maxWidth? }",
     },
     operations: Operation.options.map((o) => o.shape.op.value),
   }),
@@ -210,7 +213,113 @@ app.on(["GET", "HEAD"], "/files/*", async (c) => {
 app.post("/pdf/info", async (c) => {
   const { body, uploads } = await readRequest(c);
   const { source } = z.object({ source: PdfSource }).parse(body);
-  return c.json(documentInfo(await loadPdf(ctxOf(c, uploads), source)));
+  const ctx = ctxOf(c, uploads);
+  const bytes = await readSource(ctx, source);
+  // XFA is kept so it can be reported; nothing is saved.
+  if (source.password === undefined) {
+    const peek = await openPdf(bytes, undefined, { ignoreEncryption: true });
+    if (peek.isEncrypted) return c.json(lockedInfo(peek));
+  }
+  return c.json(documentInfo(await openPdf(bytes, source.password, { preserveXFA: true })));
+});
+
+app.post("/pdf/scripts", async (c) => {
+  const { body, uploads } = await readRequest(c);
+  const { source } = z.object({ source: PdfSource }).parse(body);
+  return c.json(documentScripts(await loadPdf(ctxOf(c, uploads), source, { preserveXFA: true })));
+});
+
+app.post("/pdf/extract", async (c) => {
+  const { body, uploads } = await readRequest(c);
+  const req = z
+    .object({
+      source: PdfSource,
+      pages: PageSpec.optional(),
+      include: z.array(z.enum(["images", "graphics", "text", "attachments"])).min(1).default(["images", "attachments"]),
+      /** Save images and attachments to R2 and return links; false returns base64. */
+      store: z.boolean().default(true),
+      prefix: z.string().max(900).optional(),
+      linkTtl: z.number().int().positive().max(7 * 24 * 3600).optional(),
+    })
+    .parse(body);
+  const doc = await loadPdf(ctxOf(c, uploads), req.source);
+  const want = new Set(req.include);
+  const prefix = req.prefix ?? `extracted/${crypto.randomUUID()}/`;
+  const origin = new URL(c.req.url).origin;
+  const file = async (name: string, bytes: Uint8Array, contentType: string) => {
+    if (!req.store) return { base64: bytesToBase64(bytes) };
+    const key = R2Key.parse(prefix + name);
+    await c.env.PDF_BUCKET.put(key, bytes, { httpMetadata: { contentType } });
+    return { key, ...(await signedUrl(c.env, origin, key, req.linkTtl)) };
+  };
+  const all = doc.getPages();
+  const pages = [];
+  for (const i of resolvePages(req.pages, all.length)) {
+    const assets = all[i].extractContents();
+    const out: Record<string, unknown> = { page: i + 1 };
+    if (want.has("text")) {
+      const items = assets.flatMap((a) => (a.kind === "text" ? [{ text: a.getText(), x: a.x, y: a.y, fontSize: a.fontSize, fontFamily: a.fontFamily }] : []));
+      out.text = joinText(items);
+    }
+    if (want.has("images")) {
+      const images = [];
+      let n = 0;
+      for (const a of assets) {
+        if (a.kind !== "image") continue;
+        const ext = a.mimeType === "image/png" ? "png" : "jpg";
+        const stored = await file(`page-${i + 1}-image-${++n}.${ext}`, a.getBytes(), a.mimeType);
+        images.push({ mimeType: a.mimeType, width: a.width, height: a.height, x: a.x, y: a.y, drawWidth: a.drawWidth, drawHeight: a.drawHeight, ...stored });
+      }
+      out.images = images;
+    }
+    if (want.has("graphics")) {
+      out.graphics = assets.flatMap((a) => (a.kind === "graphics" ? [{ x: a.x, y: a.y, width: a.width, height: a.height, svg: a.getSvg() }] : []));
+    }
+    pages.push(out);
+  }
+  const result: Record<string, unknown> = { pages };
+  if (want.has("attachments")) {
+    const attachments = [];
+    for (const a of doc.getAttachments()) {
+      const safe = a.name.replace(/[^\w.-]+/g, "_");
+      attachments.push({ name: a.name, mimeType: a.mimeType ?? null, description: a.description ?? null, size: a.data.byteLength, ...(await file(`attachments/${safe}`, a.data, a.mimeType ?? "application/octet-stream")) });
+    }
+    result.attachments = attachments;
+  }
+  return c.json(result);
+});
+
+app.post("/text/measure", async (c) => {
+  const { body, uploads } = await readRequest(c);
+  const req = z
+    .object({
+      text: z.string(),
+      font: z.union([z.string(), FontSource]).default("Helvetica"),
+      size: z.number().positive().default(12),
+      /** Wrap at this width and return the lines. */
+      maxWidth: z.number().positive().optional(),
+      wordBreaks: z.array(z.string()).default([" "]),
+      lineHeight: z.number().positive().optional(),
+      /** Also return the font size whose height equals this. */
+      fitHeight: z.number().positive().optional(),
+    })
+    .parse(body);
+  const doc = await PDFDocument.create();
+  const ctx = ctxOf(c, uploads);
+  if (typeof req.font === "string" && !(Object.values(StandardFonts) as string[]).includes(req.font)) throw badRequest(`Unknown standard font "${req.font}"`);
+  const font = await embedFontSpec(doc, ctx, req.font as Parameters<typeof embedFontSpec>[2]);
+  checkText(font, req.text);
+  const lineHeight = req.lineHeight ?? req.size * 1.2;
+  const lines = req.text.split("\n").flatMap((l) => (req.maxWidth ? breakTextIntoLines(l, req.wordBreaks, req.maxWidth, (t) => font.widthOfTextAtSize(t, req.size)) : [l]));
+  const widths = lines.map((l) => font.widthOfTextAtSize(l, req.size));
+  return c.json({
+    width: Math.max(0, ...widths),
+    height: font.heightAtSize(req.size),
+    ascent: font.heightAtSize(req.size, { descender: false }),
+    lines: lines.map((text, i) => ({ text, width: widths[i] })),
+    blockHeight: lines.length ? (lines.length - 1) * lineHeight + font.heightAtSize(req.size) : 0,
+    ...(req.fitHeight ? { sizeForHeight: font.sizeAtHeight(req.fitHeight) } : {}),
+  });
 });
 
 app.post("/pdf/text", async (c) => {
@@ -240,10 +349,18 @@ app.post("/pdf/create", async (c) => {
 
 app.post("/pdf/edit", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const req = z.object({ source: PdfSource, operations: Operations.min(1), output: Output }).parse(body);
-  const doc = await loadPdf(ctxOf(c, uploads), req.source);
+  const req = z
+    .object({
+      source: PdfSource,
+      operations: Operations.min(1),
+      /** Keep the original bytes and append the changes, so existing digital signatures stay valid. */
+      incremental: z.boolean().default(false),
+      output: Output,
+    })
+    .parse(body);
+  const doc = await loadPdf(ctxOf(c, uploads), req.source, { incremental: req.incremental });
   await runOps(c, doc, uploads, req.operations);
-  return sendPdf(c, doc, req.output);
+  return sendPdf(c, doc, req.output, { incremental: req.incremental });
 });
 
 app.post("/pdf/merge", async (c) => {

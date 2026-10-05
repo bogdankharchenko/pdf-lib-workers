@@ -1,4 +1,4 @@
-import { PDFDict, PDFDocument, PDFRef, EncryptedPDFError } from "@cantoo/pdf-lib";
+import { PDFDict, PDFDocument, PDFName, PDFRef, PDFStream, EncryptedPDFError } from "@cantoo/pdf-lib";
 import type { Env } from "./env";
 import { HttpError, badRequest } from "./errors";
 import type { PdfSource, Source } from "./schemas";
@@ -150,14 +150,31 @@ export function looksLikePdf(bytes: Uint8Array): boolean {
   return false;
 }
 
-export async function loadPdf(ctx: Ctx, src: PdfSource): Promise<PDFDocument> {
-  return openPdf(await readSource(ctx, src), src.password);
+export interface OpenOptions {
+  preserveXFA?: boolean;
+  /** Keep the original bytes and append changes (see PDFDocument.commit). */
+  incremental?: boolean;
+  /** Open an encrypted file without its password; only its structure is readable. */
+  ignoreEncryption?: boolean;
 }
 
-export async function openPdf(bytes: Uint8Array, password?: string): Promise<PDFDocument> {
+export async function loadPdf(ctx: Ctx, src: PdfSource, opts: OpenOptions = {}): Promise<PDFDocument> {
+  return openPdf(await readSource(ctx, src), src.password, { preserveXFA: src.preserveXFA, ...opts });
+}
+
+export async function openPdf(bytes: Uint8Array, password?: string, opts: OpenOptions = {}): Promise<PDFDocument> {
   try {
-    const doc = await PDFDocument.load(bytes, { password, updateMetadata: false });
-    if (!doc.context.trailerInfo.Info && password !== undefined) recoverInfo(doc, bytes);
+    const doc = await PDFDocument.load(bytes, {
+      password,
+      updateMetadata: false,
+      preserveXFA: opts.preserveXFA ?? false,
+      forIncrementalUpdate: opts.incremental ?? false,
+      ignoreEncryption: opts.ignoreEncryption ?? false,
+    });
+    if (password !== undefined && doc.context.isDecrypted) {
+      if (!doc.context.trailerInfo.Info) recoverInfo(doc, bytes);
+      if (!opts.incremental) dropEncryptionLeftovers(doc);
+    }
     return doc;
   } catch (e) {
     if (e instanceof EncryptedPDFError) {
@@ -183,4 +200,19 @@ function recoverInfo(doc: PDFDocument, bytes: Uint8Array) {
   if (!m) return;
   const ref = PDFRef.of(Number(m[1]), Number(m[2]));
   if (doc.context.lookup(ref) instanceof PDFDict) doc.context.trailerInfo.Info = ref;
+}
+
+/**
+ * After decrypting, the library keeps the old cross-reference stream and
+ * encryption dictionary as ordinary objects. Saved again, they make its own
+ * parser treat the (now unencrypted) file as encrypted. Remove them.
+ */
+function dropEncryptionLeftovers(doc: PDFDocument) {
+  for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
+    const dict = obj instanceof PDFStream ? obj.dict : obj instanceof PDFDict ? obj : undefined;
+    if (!dict) continue;
+    const isXref = dict.get(PDFName.of("Type")) === PDFName.of("XRef");
+    const isEncrypt = dict.get(PDFName.of("Filter")) === PDFName.of("Standard") && dict.has(PDFName.of("O")) && dict.has(PDFName.of("U"));
+    if (isXref || isEncrypt) doc.context.delete(ref);
+  }
 }

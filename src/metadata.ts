@@ -76,6 +76,25 @@ ${fields.join("\n")}
   doc.catalog.set(PDFName.of("Metadata"), doc.context.register(stream));
 }
 
+/**
+ * Copyright and custom fields as a stand-alone rdf:Description, for PDF/A
+ * conversion: the library rewrites PDF/A XMP on save and keeps only blocks in
+ * namespaces it does not own (dc, xmp, pdf, pdfaid are its own).
+ */
+export function foreignXmp(doc: PDFDocument): string | undefined {
+  const custom = customInfo(doc);
+  const fields: string[] = [];
+  if (custom[COPYRIGHT] || custom[COPYRIGHT_URL]) fields.push("<xmpRights:Marked>True</xmpRights:Marked>");
+  if (custom[COPYRIGHT_URL]) fields.push(`<xmpRights:WebStatement>${esc(custom[COPYRIGHT_URL])}</xmpRights:WebStatement>`);
+  for (const [k, v] of Object.entries(custom)) {
+    if (k !== COPYRIGHT && k !== COPYRIGHT_URL && CUSTOM_KEY.test(k)) fields.push(`<pdfx:${k}>${esc(v)}</pdfx:${k}>`);
+  }
+  if (!fields.length) return undefined;
+  return `<rdf:Description rdf:about="" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/" xmlns:pdfx="http://ns.adobe.com/pdfx/1.3/">
+${fields.join("\n")}
+</rdf:Description>`;
+}
+
 /** The catalog's XMP packet as text, if any. */
 export function readXmp(doc: PDFDocument): string | undefined {
   const ref = doc.catalog.get(PDFName.of("Metadata"));
