@@ -93,7 +93,7 @@ The two expiry rules cover where the API saves results by default: `outputs/` (`
 
 Optional: `npx wrangler secret put SIGNING_KEY` — a separate key for download links (defaults to `API_KEY`). Changing it voids all links already handed out.
 
-Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `npm test`. After changing a schema or route, run `npm run openapi` to regenerate `openapi.json`; `npm test` fails until you do.
+Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `npm test`. After changing a schema or route, run `npm run openapi` to regenerate `openapi.json`; `npm test` fails until you do. CI runs the typecheck, the tests and a build of the Worker on every pull request and push to `main`.
 
 ## Auth and access
 
