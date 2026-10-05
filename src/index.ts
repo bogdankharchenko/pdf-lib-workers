@@ -126,8 +126,7 @@ function wantsPdf(c: C): boolean {
 /** Saves `doc` (or appends to it, for incremental edits) and replies as JSON or PDF bytes, per the Accept header. */
 async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { incremental?: boolean } = {}) {
   const bytes = opts.incremental ? await doc.commit({ useObjectStreams: output.useObjectStreams }) : await doc.save({ useObjectStreams: output.useObjectStreams });
-  const filename = output.filename ?? "document.pdf";
-  const disposition = `inline; filename="${filename.replace(/["\\\r\n]/g, "_")}"`;
+  const disposition = contentDisposition("inline", output.filename ?? "document.pdf");
   let key: string | undefined;
   let link: { url: string; expiresAt: string } | undefined;
   if (output.store) {
@@ -146,6 +145,18 @@ async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { increment
   }
   const facts = { size: bytes.byteLength, pageCount: doc.getPageCount() };
   return c.json((key && link ? { key, ...link, ...facts } : { base64: bytesToBase64(bytes), ...facts }) satisfies PdfResult);
+}
+
+/**
+ * A Content-Disposition header value. Header values must be ASCII, so a name
+ * with anything else gets an ASCII fallback plus the real name, percent-encoded,
+ * in filename* (RFC 6266).
+ */
+function contentDisposition(type: "inline" | "attachment", filename: string): string {
+  const fallback = filename.replace(/[^\x20-\x7e]|["\\%]/g, "_");
+  if (fallback === filename) return `${type}; filename="${filename}"`;
+  const encoded = encodeURIComponent(filename).replace(/['()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${type}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -215,7 +226,7 @@ app.on(["GET", "HEAD"], "/files/*", async (c) => {
   obj.writeHttpMetadata(headers);
   headers.set("etag", obj.httpEtag);
   headers.set("accept-ranges", "bytes");
-  if (c.req.query("download") !== undefined) headers.set("content-disposition", `attachment; filename="${key.split("/").pop()}"`);
+  if (c.req.query("download") !== undefined) headers.set("content-disposition", contentDisposition("attachment", key.split("/").pop()!));
   if (!("body" in obj)) return new Response(null, { status: 304, headers });
   let status = 200;
   if (obj.range && c.req.header("range")) {

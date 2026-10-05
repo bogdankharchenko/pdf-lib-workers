@@ -47,6 +47,25 @@ describe("downloads", () => {
     expect((await call("/files/tests/missing.pdf")).status).toBe(404);
   });
 
+  it("names files in ASCII, with non-ASCII names in filename* (RFC 6266)", async () => {
+    const create = (filename: string) =>
+      call("/pdf/create", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/pdf" },
+        body: JSON.stringify({ output: { key: "tests/named.pdf", filename } }),
+      });
+    const disposition = async (res: Response | Promise<Response>) => (await res).headers.get("content-disposition");
+
+    expect(await disposition(create("Invoice 42.pdf"))).toBe('inline; filename="Invoice 42.pdf"');
+
+    const unicode = `inline; filename="_____ 2026.pdf"; filename*=UTF-8''%D0%9E%D1%82%D1%87%D1%91%D1%82%202026.pdf`;
+    expect(await disposition(create("Отчёт 2026.pdf"))).toBe(unicode);
+    expect(await disposition(call("/files/tests/named.pdf"))).toBe(unicode);
+
+    expect(await disposition(create('a "quoted" 100%.pdf'))).toBe(`inline; filename="a _quoted_ 100_.pdf"; filename*=UTF-8''a%20%22quoted%22%20100%25.pdf`);
+    expect(await disposition(call("/files/tests/named.pdf?download"))).toBe('attachment; filename="named.pdf"');
+  });
+
   it("no longer has upload, list, sign or delete endpoints", async () => {
     expect((await call("/files", { method: "POST", body: "x" })).status).toBe(404);
     expect((await call("/files")).status).toBe(404);
