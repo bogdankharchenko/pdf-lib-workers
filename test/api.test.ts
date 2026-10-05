@@ -4,6 +4,7 @@ import { readXmp } from "../src/metadata";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 const worker = (exports as unknown as { default: Fetcher }).default;
+const bucket = (env as unknown as { PDF_BUCKET: R2Bucket }).PDF_BUCKET;
 const AUTH = { authorization: "Bearer test-key" };
 const BASE = "https://pdf.test";
 
@@ -60,51 +61,46 @@ describe("auth", () => {
     expect((await res.json<any>()).operations).toContain("drawText");
   });
   it("rejects missing or wrong keys", async () => {
-    expect((await worker.fetch(new Request(BASE + "/files"))).status).toBe(401);
-    const bad = await worker.fetch(new Request(BASE + "/files", { headers: { authorization: "Bearer nope" } }));
+    expect((await worker.fetch(new Request(BASE + "/pdf/create", { method: "POST" }))).status).toBe(401);
+    const bad = await worker.fetch(new Request(BASE + "/pdf/create", { method: "POST", headers: { authorization: "Bearer nope" } }));
     expect(bad.status).toBe(401);
+    expect((await worker.fetch(new Request(BASE + "/files/outputs/x.pdf"))).status).toBe(401);
   });
   it("accepts X-API-Key", async () => {
-    const res = await worker.fetch(new Request(BASE + "/files", { headers: { "x-api-key": "test-key" } }));
+    const res = await worker.fetch(new Request(BASE + "/pdf/create", { method: "POST", headers: { "x-api-key": "test-key" } }));
     expect(res.status).toBe(200);
   });
 });
 
-describe("files", () => {
-  it("uploads, lists, signs, downloads with range, deletes", async () => {
-    const pdf = await samplePdf(1);
-    const up = await json(call("/files?key=tests/a.pdf", { method: "POST", headers: { "content-type": "application/pdf" }, body: pdf }));
-    expect(up.key).toBe("tests/a.pdf");
-    expect(up.url).toContain("sig=");
+describe("downloads", () => {
+  it("serves results by API key or signed link, with ranges", async () => {
+    const out = await json(post("/pdf/create", { output: { key: "tests/a.pdf" } }));
+    expect(out.url).toContain("sig=");
+    const pdf = await download(out.url);
+    expect(pdf.byteLength).toBe(out.size);
 
-    const list = await json(call("/files?prefix=tests/"));
-    expect(list.files.map((f: any) => f.key)).toContain("tests/a.pdf");
+    const withKey = await call("/files/tests/a.pdf");
+    expect(withKey.status).toBe(200);
 
-    expect((await download(up.url)).byteLength).toBe(pdf.byteLength);
-
-    const ranged = await worker.fetch(new Request(up.url, { headers: { range: "bytes=0-4" } }));
+    const ranged = await worker.fetch(new Request(out.url, { headers: { range: "bytes=0-4" } }));
     expect(ranged.status).toBe(206);
     expect(await ranged.text()).toBe("%PDF-");
 
-    const tampered = up.url.replace("tests/a.pdf", "tests/b.pdf");
+    const tampered = out.url.replace("tests/a.pdf", "tests/b.pdf");
     expect((await worker.fetch(new Request(tampered))).status).toBe(403);
 
-    const expired = new URL(up.url);
+    const expired = new URL(out.url);
     expired.searchParams.set("expires", "1000");
     expect((await worker.fetch(new Request(expired))).status).toBe(403);
 
-    const signed = await json(post("/files/sign", { key: "tests/a.pdf", ttl: 60 }));
-    expect((await download(signed.url)).byteLength).toBe(pdf.byteLength);
-
-    expect((await call("/files/tests/a.pdf", { method: "DELETE" })).status).toBe(200);
-    expect((await call("/files/tests/a.pdf")).status).toBe(404);
+    expect((await call("/files/tests/missing.pdf")).status).toBe(404);
   });
 
-  it("accepts multipart uploads", async () => {
-    const fd = new FormData();
-    fd.set("file", new File([await samplePdf(1)], "x.pdf", { type: "application/pdf" }));
-    const up = await json(call("/files", { method: "POST", body: fd }));
-    expect(up.key).toMatch(/^uploads\/.+\.pdf$/);
+  it("no longer has upload, list, sign or delete endpoints", async () => {
+    expect((await call("/files", { method: "POST", body: "x" })).status).toBe(404);
+    expect((await call("/files")).status).toBe(404);
+    expect((await post("/files/sign", { key: "tests/a.pdf" })).status).toBe(404);
+    expect((await call("/files/tests/a.pdf", { method: "DELETE" })).status).toBe(404);
   });
 });
 
@@ -318,7 +314,7 @@ describe("inputs: URLs and file data", () => {
   it("stitches URLs, R2 keys, base64 and uploads in one call, then watermarks", async () => {
     serve("https://files.test/a.pdf", await samplePdf(2, "A"));
     serve("https://files.test/b.pdf", await samplePdf(1, "B"));
-    await json(call("/files?key=tests/c.pdf", { method: "POST", headers: { "content-type": "application/pdf" }, body: await samplePdf(1, "C") }));
+    await bucket.put("tests/c.pdf", await samplePdf(1, "C"));
     const fd = new FormData();
     fd.set("e", new File([await samplePdf(3, "E")], "e.pdf"));
     fd.set(
@@ -449,7 +445,7 @@ function fakeJpeg(w: number, h: number, orientation?: number) {
 
 /** Where images were painted on each page, from the PDF itself. */
 async function imagesOn(key: string) {
-  const doc = await PDFDocument.load(await download((await json(post("/files/sign", { key }))).url));
+  const doc = await PDFDocument.load(await (await bucket.get(key))!.arrayBuffer());
   return doc.getPages().map((p) =>
     p.extractContents().flatMap((a) => (a.kind === "image" ? [{ x: Math.round(a.x) + 0, y: Math.round(a.y) + 0, w: Math.round(a.drawWidth), h: Math.round(a.drawHeight) }] : [])),
   );

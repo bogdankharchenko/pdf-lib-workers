@@ -22,7 +22,9 @@ Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `
 ## Auth
 
 Send `Authorization: Bearer <API_KEY>` (or `X-API-Key: <API_KEY>`) on every call.
-Download links returned by the API carry their own signature (`?expires=…&sig=…`) and work without the key until they expire (default 1 hour, set `SIGNED_URL_TTL`).
+Download links returned by the API carry their own signature (`?expires=…&sig=…`) and work without the key until they expire (default 1 hour via `SIGNED_URL_TTL`; up to 7 days per request with `output.linkTtl`).
+
+The API has no upload, list or delete endpoints. Send inputs with each request (URL, upload or base64). To keep reusable files in R2 (templates, fonts, logos) and refer to them by `key`, add them with the Cloudflare dashboard or `npx wrangler r2 object put pdf-lib-workers/<key> --file <path> --remote`. Remove old outputs with the lifecycle rule above.
 
 ## Sources: URLs or file data
 
@@ -66,11 +68,7 @@ Endpoints that make a PDF take an optional `output`:
 | Method & path | Body | Does |
 | --- | --- | --- |
 | `GET /` | | Lists endpoints and operations (no auth) |
-| `POST /files?key=` | raw bytes or multipart `file` | Upload to R2 |
-| `GET /files?prefix=&cursor=&limit=` | | List |
-| `GET /files/<key>` | | Download (key or signed link; supports `Range`; `?download` forces save) |
-| `POST /files/sign` | `{ key, ttl? }` | New signed link |
-| `DELETE /files/<key>` | | Delete |
+| `GET /files/<key>` | | Download a result (API key or its signed link; supports `Range`; `?download` forces save) |
 | `POST /pdf/info` | `{ source }` | Page sizes, rotation, metadata, form fields, attachments |
 | `POST /pdf/text` | `{ source, pages?, items? }` | Text per page (`items: true` adds positions and fonts) |
 | `POST /pdf/create` | `{ size?, pageCount?, operations?, output? }` | New PDF |
@@ -190,4 +188,4 @@ curl -s -H "$H" -H 'Content-Type: application/pdf' --data-binary @in.pdf "$API/p
 
 - `limits.cpu_ms` is 300000 (5 min, paid plan) in `wrangler.jsonc`.
 - Workers have 128 MB memory; the whole PDF is held in memory, so stay well under ~50 MB per file.
-- Request bodies are capped by your Cloudflare plan (100 MB on Free/Pro). For large files, upload to R2 first and pass `{ "key": … }`.
+- Request bodies are capped by your Cloudflare plan (100 MB on Free/Pro). For large files, pass a URL, or put the file in R2 (dashboard or wrangler) and pass `{ "key": … }`.

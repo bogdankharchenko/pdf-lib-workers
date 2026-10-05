@@ -169,11 +169,7 @@ app.get("/", (c) =>
     sources:
       'A PDF, image, font or attachment can be a URL string, an R2 key string, { url, headers? }, { key }, { base64 }, or { upload } naming a multipart file by field or file name. Send files as multipart (plus an "options" JSON field) or as a raw body (plus ?options=).',
     endpoints: {
-      "POST /files": "Upload a file (raw body or multipart 'file'). ?key= sets the R2 key.",
-      "GET /files": "List files. ?prefix= &cursor= &limit=",
-      "GET /files/:key": "Download a file (API key or signed link).",
-      "POST /files/sign": "Make a signed download link: { key, ttl? }",
-      "DELETE /files/:key": "Delete a file.",
+      "GET /files/:key": "Download a result (API key or the signed link it came with).",
       "POST /pdf/info": "Page count, sizes, metadata, form fields, attachments: { source }",
       "POST /pdf/text": "Extract text: { source, pages?, items? }",
       "POST /pdf/create": "New PDF: { size?, pageCount?, operations?, output? }",
@@ -185,45 +181,7 @@ app.get("/", (c) =>
   }),
 );
 
-// ---------- files ----------
-
-app.post("/files", async (c) => {
-  const type = c.req.header("content-type") ?? "application/octet-stream";
-  let bytes: ArrayBuffer;
-  let contentType = type;
-  let name: string | undefined;
-  if (type.startsWith("multipart/form-data")) {
-    const form = await c.req.formData();
-    const file = form.get("file");
-    if (!file || typeof file === "string") throw badRequest('Multipart upload needs a "file" field');
-    bytes = await file.arrayBuffer();
-    contentType = file.type || "application/octet-stream";
-    name = file.name;
-  } else {
-    bytes = await c.req.arrayBuffer();
-  }
-  if (!bytes.byteLength) throw badRequest("Empty upload");
-  const ext = contentType.includes("pdf") ? ".pdf" : (name?.match(/\.[\w]+$/)?.[0] ?? "");
-  const key = R2Key.parse(c.req.query("key") ?? `uploads/${crypto.randomUUID()}${ext}`);
-  await c.env.PDF_BUCKET.put(key, bytes, { httpMetadata: { contentType } });
-  const link = await signedUrl(c.env, new URL(c.req.url).origin, key);
-  return c.json({ key, size: bytes.byteLength, contentType, ...link }, 201);
-});
-
-app.get("/files", async (c) => {
-  const limit = Math.min(Number(c.req.query("limit") ?? 100) || 100, 1000);
-  const res = await c.env.PDF_BUCKET.list({ prefix: c.req.query("prefix"), cursor: c.req.query("cursor"), limit });
-  return c.json({
-    files: res.objects.map((o) => ({ key: o.key, size: o.size, uploaded: o.uploaded.toISOString(), contentType: o.httpMetadata?.contentType ?? null })),
-    cursor: res.truncated ? res.cursor : null,
-  });
-});
-
-app.post("/files/sign", async (c) => {
-  const { key, ttl } = z.object({ key: R2Key, ttl: z.number().int().positive().max(7 * 24 * 3600).optional() }).parse(await c.req.json());
-  if (!(await c.env.PDF_BUCKET.head(key))) throw new HttpError(404, `No file at key "${key}"`);
-  return c.json({ key, ...(await signedUrl(c.env, new URL(c.req.url).origin, key, ttl)) });
-});
+// ---------- download ----------
 
 app.on(["GET", "HEAD"], "/files/*", async (c) => {
   const key = fileKey(c);
@@ -245,12 +203,6 @@ app.on(["GET", "HEAD"], "/files/*", async (c) => {
     headers.set("content-length", String(obj.size));
   }
   return new Response(c.req.method === "HEAD" ? null : obj.body, { status, headers });
-});
-
-app.delete("/files/*", async (c) => {
-  const key = fileKey(c);
-  await c.env.PDF_BUCKET.delete(key);
-  return c.json({ deleted: key });
 });
 
 // ---------- pdf ----------
