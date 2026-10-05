@@ -1,13 +1,16 @@
-import { PDFDocument, StandardFonts, breakTextIntoLines } from "@cantoo/pdf-lib";
+import { PDFDocument, breakTextIntoLines } from "@cantoo/pdf-lib";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import type { Env } from "./env";
 import { HttpError, badRequest } from "./errors";
 import { documentInfo, documentScripts, extractText, joinText, lockedInfo } from "./inspect";
-import { Editor, Operation, Operations, addSource, checkText, embedFontSpec } from "./operations";
+import { openApiDocument } from "./openapi";
+import { Editor, Operation, addSource, checkText, embedFontSpec } from "./operations";
 import { resolvePages } from "./pages";
-import { FontSource, MergeSource, Output, PageSize, PageSpec, PdfSource, R2Key, pageSize } from "./schemas";
+import type { ExtractResponse, MeasureResponse, PdfResult, SplitResponse } from "./replies";
+import { CreateRequest, EditRequest, ExtractRequest, InfoRequest, MeasureRequest, MergeRequest, ScriptsRequest, SplitRequest, TextRequest } from "./requests";
+import { type Output, R2Key, pageSize } from "./schemas";
 import { signedUrl, timingSafeEqual, verifySignature } from "./signing";
 import { imageKind } from "./images";
 import { type Ctx, type Upload, assignRefs, findUpload, loadPdf, looksLikePdf, openPdf, readAhead, readSource } from "./sources";
@@ -19,9 +22,11 @@ const app = new Hono<App>();
 
 app.use("*", cors({ origin: "*", exposeHeaders: ["X-File-Key", "X-File-Url", "X-Page-Count"] }));
 
-// Every route needs the API key, except the index and signed download links.
+const PUBLIC_PATHS = new Set(["/", "/openapi.json"]);
+
+// Every route needs the API key, except the index, the spec and signed download links.
 app.use("*", async (c, next) => {
-  if (c.req.method === "OPTIONS" || c.req.path === "/") return next();
+  if (c.req.method === "OPTIONS" || (c.req.method === "GET" && PUBLIC_PATHS.has(c.req.path))) return next();
   const isDownload = (c.req.method === "GET" || c.req.method === "HEAD") && c.req.path.startsWith("/files/");
   if (isDownload && c.req.query("sig")) {
     const ok = await verifySignature(c.env, fileKey(c), c.req.query("expires"), c.req.query("sig"));
@@ -128,11 +133,8 @@ async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { increment
     }
     return new Response(bytes, { headers });
   }
-  return c.json({
-    ...(key ? { key, url: link!.url, expiresAt: link!.expiresAt } : { base64: bytesToBase64(bytes) }),
-    size: bytes.byteLength,
-    pageCount: doc.getPageCount(),
-  });
+  const facts = { size: bytes.byteLength, pageCount: doc.getPageCount() };
+  return c.json((key && link ? { key, ...link, ...facts } : { base64: bytesToBase64(bytes), ...facts }) satisfies PdfResult);
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -165,6 +167,7 @@ const ctxOf = (c: C, uploads: Upload[]): Ctx => ({ env: c.env, uploads, origin: 
 app.get("/", (c) =>
   c.json({
     name: "pdf-lib-workers",
+    openapi: "/openapi.json",
     auth: "Authorization: Bearer <API_KEY>",
     sources:
       'A PDF, image, font or attachment can be a URL string, an R2 key string, { url, headers? }, { key }, { base64 }, or { upload } naming a multipart file by field or file name. Send files as multipart (plus an "options" JSON field) or as a raw body (plus ?options=).',
@@ -183,6 +186,13 @@ app.get("/", (c) =>
     operations: Operation.options.map((o) => o.shape.op.value),
   }),
 );
+
+let spec: ReturnType<typeof openApiDocument> | undefined;
+
+app.get("/openapi.json", (c) => {
+  spec ??= openApiDocument();
+  return c.json({ ...spec, servers: [{ url: new URL(c.req.url).origin, description: "This deployment." }] });
+});
 
 // ---------- download ----------
 
@@ -212,7 +222,7 @@ app.on(["GET", "HEAD"], "/files/*", async (c) => {
 
 app.post("/pdf/info", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const { source } = z.object({ source: PdfSource }).parse(body);
+  const { source } = InfoRequest.parse(body);
   const ctx = ctxOf(c, uploads);
   const bytes = await readSource(ctx, source);
   // XFA is kept so it can be reported; nothing is saved.
@@ -225,23 +235,13 @@ app.post("/pdf/info", async (c) => {
 
 app.post("/pdf/scripts", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const { source } = z.object({ source: PdfSource }).parse(body);
+  const { source } = ScriptsRequest.parse(body);
   return c.json(documentScripts(await loadPdf(ctxOf(c, uploads), source, { preserveXFA: true })));
 });
 
 app.post("/pdf/extract", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const req = z
-    .object({
-      source: PdfSource,
-      pages: PageSpec.optional(),
-      include: z.array(z.enum(["images", "graphics", "text", "attachments"])).min(1).default(["images", "attachments"]),
-      /** Save images and attachments to R2 and return links; false returns base64. */
-      store: z.boolean().default(true),
-      prefix: z.string().max(900).optional(),
-      linkTtl: z.number().int().positive().max(7 * 24 * 3600).optional(),
-    })
-    .parse(body);
+  const req = ExtractRequest.parse(body);
   const doc = await loadPdf(ctxOf(c, uploads), req.source);
   const want = new Set(req.include);
   const prefix = req.prefix ?? `extracted/${crypto.randomUUID()}/`;
@@ -253,16 +253,16 @@ app.post("/pdf/extract", async (c) => {
     return { key, ...(await signedUrl(c.env, origin, key, req.linkTtl)) };
   };
   const all = doc.getPages();
-  const pages = [];
+  const pages: ExtractResponse["pages"] = [];
   for (const i of resolvePages(req.pages, all.length)) {
     const assets = all[i].extractContents();
-    const out: Record<string, unknown> = { page: i + 1 };
+    const out: ExtractResponse["pages"][number] = { page: i + 1 };
     if (want.has("text")) {
       const items = assets.flatMap((a) => (a.kind === "text" ? [{ text: a.getText(), x: a.x, y: a.y, fontSize: a.fontSize, fontFamily: a.fontFamily }] : []));
       out.text = joinText(items);
     }
     if (want.has("images")) {
-      const images = [];
+      const images: NonNullable<typeof out.images> = [];
       let n = 0;
       for (const a of assets) {
         if (a.kind !== "image") continue;
@@ -277,9 +277,9 @@ app.post("/pdf/extract", async (c) => {
     }
     pages.push(out);
   }
-  const result: Record<string, unknown> = { pages };
+  const result: ExtractResponse = { pages };
   if (want.has("attachments")) {
-    const attachments = [];
+    const attachments: NonNullable<ExtractResponse["attachments"]> = [];
     for (const a of doc.getAttachments()) {
       const safe = a.name.replace(/[^\w.-]+/g, "_");
       attachments.push({ name: a.name, mimeType: a.mimeType ?? null, description: a.description ?? null, size: a.data.byteLength, ...(await file(`attachments/${safe}`, a.data, a.mimeType ?? "application/octet-stream")) });
@@ -291,23 +291,10 @@ app.post("/pdf/extract", async (c) => {
 
 app.post("/text/measure", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const req = z
-    .object({
-      text: z.string(),
-      font: z.union([z.string(), FontSource]).default("Helvetica"),
-      size: z.number().positive().default(12),
-      /** Wrap at this width and return the lines. */
-      maxWidth: z.number().positive().optional(),
-      wordBreaks: z.array(z.string()).default([" "]),
-      lineHeight: z.number().positive().optional(),
-      /** Also return the font size whose height equals this. */
-      fitHeight: z.number().positive().optional(),
-    })
-    .parse(body);
+  const req = MeasureRequest.parse(body);
   const doc = await PDFDocument.create();
   const ctx = ctxOf(c, uploads);
-  if (typeof req.font === "string" && !(Object.values(StandardFonts) as string[]).includes(req.font)) throw badRequest(`Unknown standard font "${req.font}"`);
-  const font = await embedFontSpec(doc, ctx, req.font as Parameters<typeof embedFontSpec>[2]);
+  const font = await embedFontSpec(doc, ctx, req.font);
   checkText(font, req.text);
   const lineHeight = req.lineHeight ?? req.size * 1.2;
   const lines = req.text.split("\n").flatMap((l) => (req.maxWidth ? breakTextIntoLines(l, req.wordBreaks, req.maxWidth, (t) => font.widthOfTextAtSize(t, req.size)) : [l]));
@@ -319,26 +306,19 @@ app.post("/text/measure", async (c) => {
     lines: lines.map((text, i) => ({ text, width: widths[i] })),
     blockHeight: lines.length ? (lines.length - 1) * lineHeight + font.heightAtSize(req.size) : 0,
     ...(req.fitHeight ? { sizeForHeight: font.sizeAtHeight(req.fitHeight) } : {}),
-  });
+  } satisfies MeasureResponse);
 });
 
 app.post("/pdf/text", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const req = z.object({ source: PdfSource, pages: PageSpec.optional(), items: z.boolean().default(false) }).parse(body);
+  const req = TextRequest.parse(body);
   const doc = await loadPdf(ctxOf(c, uploads), req.source);
   return c.json({ pages: extractText(doc, req.pages, req.items) });
 });
 
 app.post("/pdf/create", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const req = z
-    .object({
-      size: PageSize.default("A4"),
-      pageCount: z.number().int().min(0).max(1000).default(1),
-      operations: Operations.default([]),
-      output: Output,
-    })
-    .parse(body);
+  const req = CreateRequest.parse(body);
   const doc = await PDFDocument.create();
   const size = pageSize(req.size);
   for (let i = 0; i < req.pageCount; i++) doc.addPage(size);
@@ -349,15 +329,7 @@ app.post("/pdf/create", async (c) => {
 
 app.post("/pdf/edit", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const req = z
-    .object({
-      source: PdfSource,
-      operations: Operations.min(1),
-      /** Keep the original bytes and append the changes, so existing digital signatures stay valid. */
-      incremental: z.boolean().default(false),
-      output: Output,
-    })
-    .parse(body);
+  const req = EditRequest.parse(body);
   const doc = await loadPdf(ctxOf(c, uploads), req.source, { incremental: req.incremental });
   await runOps(c, doc, uploads, req.operations);
   return sendPdf(c, doc, req.output, { incremental: req.incremental });
@@ -372,13 +344,7 @@ app.post("/pdf/merge", async (c) => {
     const pages = uploads.filter((u) => !used.has(u) && (looksLikePdf(u.bytes) || imageKind(u.bytes)));
     body.sources = (pages.length ? pages : uploads).map((u) => ({ upload: u.ref }));
   }
-  const req = z
-    .object({
-      sources: z.array(MergeSource).min(1).max(200),
-      operations: Operations.default([]),
-      output: Output,
-    })
-    .parse(body);
+  const req = MergeRequest.parse(body);
   const ctx = ctxOf(c, uploads);
   const read = readAhead(req.sources, (src) => readSource(ctx, src));
   const doc = await PDFDocument.create();
@@ -399,18 +365,7 @@ app.post("/pdf/merge", async (c) => {
 
 app.post("/pdf/split", async (c) => {
   const { body, uploads } = await readRequest(c);
-  const req = z
-    .object({
-      source: PdfSource,
-      /** One output per entry, e.g. ["1-3", "4-last"]. */
-      ranges: z.array(PageSpec).min(1).max(1000).optional(),
-      /** Pages per output when ranges is not given. */
-      every: z.number().int().positive().default(1),
-      /** R2 key prefix for the parts. Defaults to outputs/<uuid>/ */
-      prefix: z.string().max(900).optional(),
-      linkTtl: z.number().int().positive().max(7 * 24 * 3600).optional(),
-    })
-    .parse(body);
+  const req = SplitRequest.parse(body);
   const src = await loadPdf(ctxOf(c, uploads), req.source);
   const count = src.getPageCount();
   const groups = req.ranges
@@ -419,7 +374,7 @@ app.post("/pdf/split", async (c) => {
   if (groups.length > 1000) throw badRequest("Split would make more than 1000 files");
   const prefix = req.prefix ?? `outputs/${crypto.randomUUID()}/`;
   const origin = new URL(c.req.url).origin;
-  const parts = [];
+  const parts: SplitResponse["parts"] = [];
   for (const [n, idx] of groups.entries()) {
     if (!idx.length) throw badRequest(`ranges[${n}] selects no pages`);
     const part = await PDFDocument.create();
@@ -429,7 +384,7 @@ app.post("/pdf/split", async (c) => {
     await c.env.PDF_BUCKET.put(key, bytes, { httpMetadata: { contentType: "application/pdf" } });
     parts.push({ key, pages: idx.map((i) => i + 1), size: bytes.byteLength, ...(await signedUrl(c.env, origin, key, req.linkTtl)) });
   }
-  return c.json({ parts });
+  return c.json({ parts } satisfies SplitResponse);
 });
 
 async function runOps(c: C, doc: PDFDocument, uploads: Upload[], ops: Operation[]) {

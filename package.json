@@ -2,11 +2,13 @@
   "name": "pdf-lib-workers",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
+    "openapi": "vitest run test/openapi.test.ts --update",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types"
   },

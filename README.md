@@ -2,11 +2,11 @@
 
 A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.com/package/@cantoo/pdf-lib) and stores the results in a private R2 bucket. You send PDFs (and images, fonts) as URLs or file data; you get back a download link or the PDF itself.
 
-- [What you can do](#what-you-can-do)
+- [What you can do](#what-you-can-do) · [AI agents and client code](#ai-agents-and-client-code)
 - [Setup](#setup) · [Auth and access](#auth-and-access) · [Configuration](#configuration)
 - [Sending files](#sending-files) · [Getting results back](#getting-results-back)
 - [Endpoints](#endpoints) · [Operations](#operations) · [Metadata](#metadata-who-where-copyright)
-- [Errors](#errors) · [Examples](#examples) · [Limits and what it can't do](#limits-and-what-it-cant-do)
+- [Errors](#errors) · [Examples](#examples) · [Limits and what it can't do](#limits-and-what-it-cant-do) · [License](#license)
 
 ## What you can do
 
@@ -50,6 +50,31 @@ A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.c
 
 Every PDF-producing endpoint (`create`, `edit`, `merge`) takes the same `operations` list, run in order, so one request can stitch, watermark, number, tag and lock a document.
 
+## AI agents and client code
+
+Write clients from the OpenAPI 3.1 spec rather than from this page. It covers every endpoint, request and response, with a description on each field.
+
+- **Where:** `GET /openapi.json` on a deployment (no API key; `servers` lists that deployment's address), or [`openapi.json`](openapi.json) in this repo.
+- **Always current:** it's generated from the same schemas that validate requests, and the tests fail if the committed file is out of date or if any response has a field the spec doesn't list.
+- **TypeScript types:** `npx openapi-typescript https://<your-deployment>/openapi.json --default-non-nullable false -o pdf-api.d.ts`. Without that flag, fields that have defaults come out as required.
+- **Names to look for:** each request is `<Name>Request` (e.g. `MergeRequest`) and each operation is `<Op>Operation` (e.g. `WatermarkOperation`). `Operation` is a union keyed on `op`. Sources are `Source`, `PdfSource` or `MergeSource`: a shortcut string, or an object with exactly one of `key`, `url`, `base64` or `upload`.
+
+A workflow that works well:
+
+1. **Inspect** with `POST /pdf/info`: pages and sizes, form field names, types and choices, layers, attachments.
+2. **Act** with `/pdf/edit`, `/pdf/merge` or `/pdf/create`. One `operations` list, run in order, can build, stamp, fill and lock a document.
+3. **Verify** with `/pdf/info` or `/pdf/text` on the result's `key`.
+
+Things that trip people (and agents) up:
+
+- Coordinates are points (72 per inch) from the **bottom-left** corner, unless you add `"origin": "top-left"`.
+- Pages are **1-based**; negative numbers count from the end.
+- Built-in fonts cover Latin text only. Other scripts need a font file; text a font can't draw is rejected with a 400, never replaced with `?`.
+- Some sites refuse requests from Cloudflare Workers (the source URL answers 403). Send those files as uploads or base64.
+- Opening a PDF with `password` saves the result **without** one; add `encrypt` to lock it again.
+- Run `setMetadata` before `convertToPDFA`.
+- Errors name the failing input, e.g. `sources[1]: …` or `operations[2] (removePages): …`.
+
 ## Setup
 
 ```sh
@@ -68,7 +93,7 @@ The two expiry rules cover where the API saves results by default: `outputs/` (`
 
 Optional: `npx wrangler secret put SIGNING_KEY` — a separate key for download links (defaults to `API_KEY`). Changing it voids all links already handed out.
 
-Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `npm test`.
+Local dev: copy `.dev.vars.example` to `.dev.vars`, then `npm run dev`. Tests: `npm test`. After changing a schema or route, run `npm run openapi` to regenerate `openapi.json`; `npm test` fails until you do.
 
 ## Auth and access
 
@@ -152,6 +177,7 @@ Download a stored result with `GET /files/<key>` (with the key) or its signed `u
 | Method & path | Body | Does |
 | --- | --- | --- |
 | `GET /` | | Lists endpoints and operations (no auth) |
+| `GET /openapi.json` | | The OpenAPI 3.1 spec (no auth) |
 | `GET /files/<key>` | | Download a result |
 | `POST /pdf/info` | `{ source }` | Everything about a PDF except its content |
 | `POST /pdf/text` | `{ source, pages?, items? }` | Text per page |
@@ -305,7 +331,7 @@ Run in order, each `{ "op": "<name>", … }`. Errors name the failing step, e.g.
 | `removeFormFields` | `names` |
 | `setFieldScript` | `name`, `event` (`keystroke`, `format`, `validate`, `calculate`, `mouseUp`, `mouseDown`, `mouseEnter`, `mouseExit`, `focus`, `blur`), `script` — replaces an existing script (see `/pdf/scripts`); the library can't add new ones |
 
-**Field settings**: `readOnly`, `required`, `exported` (false: left out of form submissions); text: `multiline`, `maxLength` (null removes), `alignment` (`left`, `center`, `right`), `fontSize` (0 = auto), `password`, `comb` (one character per box; needs `maxLength`), `spellCheck`, `scroll`, `richText`, `fileSelect`; dropdowns and lists: `options`, `editable` (dropdown), `sort`, `multiselect`, `selectOnClick`, `fontSize`; radios: `offToggle` (clicking the chosen option clears it), `mutuallyExclusive`; buttons: `fontSize`. A setting that doesn't fit the field's type is an error.
+**Field settings**: `readOnly`, `required`, `exported` (false: left out of form submissions); text: `multiline`, `maxLength` (null removes), `alignment` (`left`, `center`, `right`), `fontSize` (0 = auto), `password`, `comb` (one character per box; needs `maxLength`), `spellCheck`, `scroll`, `richText`, `fileSelect`; dropdowns and lists: `options`, `editable` (dropdown), `sort`, `multiselect`, `selectOnClick`, `fontSize`; radios: `offToggle` (clicking the chosen option clears it), `mutuallyExclusive` (`addFormField` only; default `true` turns on one button at a time, `false` turns on every button sharing the chosen value); buttons: `fontSize`. A setting that doesn't fit the field's type is an error.
 
 Values: text fields take a string; checkboxes `true`/`false`; dropdowns and option lists an option or an array of options; radio groups an option. Flattening turns fields into plain page content so they can no longer be edited. Find field names and settings with `/pdf/info`.
 
@@ -550,3 +576,7 @@ Not supported (the library can't do these either):
 - **Bookmarks/outlines, links, comments and other annotations** (beyond form fields).
 - **Dynamic XFA forms**; static XFA is supported as described above.
 - **Images** other than PNG and JPEG (convert WebP, HEIC, TIFF first).
+
+## License
+
+[MIT](LICENSE)

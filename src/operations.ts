@@ -38,30 +38,56 @@ import { type Ctx, loadPdf, openPdf, readSource } from "./sources";
 
 // ---------- shared field types ----------
 
-const Color = z.string().regex(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i, "Color must be hex, e.g. #ff0000");
-const Opacity = z.number().min(0).max(1);
-/** A standard PDF font name (e.g. "Helvetica-Bold") or a TTF/OTF/TTC font file. */
-const Font = z.union([z.enum(Object.values(StandardFonts) as [string, ...string[]]), FontSource]);
-/** "bottom-left" is native PDF coordinates; "top-left" measures y down from the top edge. */
-const Origin = z.enum(["bottom-left", "top-left"]).default("bottom-left");
-const Point = z.object({ x: z.number(), y: z.number() });
-const Position = z.enum(["center", "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"]);
-const Blend = z.enum(Object.values(BlendMode) as [string, ...string[]]);
-const LineCap = z.enum(["butt", "round", "projecting"]);
-const Rect = z.object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() });
-const DateString = z.string().refine((s) => !Number.isNaN(Date.parse(s)), "Expected a date, e.g. 2026-10-05T12:00:00Z");
-const skew = { xSkew: z.number().optional(), ySkew: z.number().optional() };
+const Color = z
+  .string()
+  .regex(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i, "Color must be hex, e.g. #ff0000")
+  .meta({ id: "Color", description: 'A hex colour: "#rrggbb" or "#rgb".', examples: ["#1d4e89", "#f00"] });
+const Opacity = z.number().min(0).max(1).describe("0 (invisible) to 1 (opaque).");
+const BuiltInFont = z
+  .enum(Object.values(StandardFonts) as [string, ...string[]])
+  .meta({ id: "BuiltInFont", description: "One of the 14 standard PDF fonts. They cover Latin text only; use a FontSource for anything else." });
+export const Font = z
+  .union([BuiltInFont, FontSource], {
+    // A misspelled font name is the usual mistake; name it. Other inputs keep zod's detailed message.
+    error: (issue) => (typeof issue.input === "string" ? `Unknown font "${issue.input}". Use a built-in font name, e.g. "Helvetica-Bold", or a font file object.` : undefined),
+  })
+  .meta({ id: "Font", description: "A built-in font name, or a font file. Text the font cannot draw is rejected with a 400 that names the characters." });
+const OriginEnum = z.enum(["bottom-left", "top-left"]).meta({
+  id: "Origin",
+  description: 'How to read x/y. "bottom-left": PDF coordinates in points, y measured up from the bottom edge. "top-left": y measured down from the top edge, like screen coordinates.',
+});
+const Origin = OriginEnum.default("bottom-left");
+const Point = z.object({ x: z.number(), y: z.number() }).meta({ id: "Point", description: "A position in points (72 pt = 1 inch)." });
+const Position = z
+  .enum(["center", "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"])
+  .meta({ id: "Position", description: "Where on the page an item is placed." });
+const Blend = z.enum(Object.values(BlendMode) as [string, ...string[]]).meta({ id: "BlendMode", description: "How the drawing's colours mix with what is underneath." });
+const LineCap = z.enum(["butt", "round", "projecting"]).meta({ id: "LineCap", description: "Shape of line ends." });
+const Rect = z
+  .object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() })
+  .meta({ id: "Rect", description: "A box in points: lower-left corner (x, y), width and height." });
+const DateString = z
+  .string()
+  .refine((s) => !Number.isNaN(Date.parse(s)), "Expected a date, e.g. 2026-10-05T12:00:00Z")
+  .meta({ id: "DateString", description: "A date, ideally ISO 8601.", examples: ["2026-10-05T12:00:00Z"] });
+
+const pagesField = PageSpec.optional().describe("Pages to apply this to. Default: every page.");
+const rotate = z.number().optional().describe("Rotation in degrees, counter-clockwise.");
+const skew = { xSkew: z.number().optional().describe("Horizontal skew in degrees."), ySkew: z.number().optional().describe("Vertical skew in degrees.") };
+const blendMode = Blend.optional();
+const at = z.number().int().positive().optional().describe("1-based position to insert at. Default: after the last page.");
+
 /** Fill and border styling shared by rectangles, ellipses and SVG paths. */
 const shapeStyle = {
-  color: Color.optional(),
+  color: Color.optional().describe("Fill colour. Default: no fill."),
   opacity: Opacity.optional(),
-  borderColor: Color.optional(),
-  borderWidth: z.number().nonnegative().optional(),
-  borderOpacity: Opacity.optional(),
-  borderDashArray: z.array(z.number().nonnegative()).optional(),
-  borderDashPhase: z.number().optional(),
+  borderColor: Color.optional().describe("Border colour. Default: no border."),
+  borderWidth: z.number().nonnegative().optional().describe("Border width in points. Default: 1 when borderColor is set."),
+  borderOpacity: Opacity.optional().describe("Border opacity. Default: same as opacity."),
+  borderDashArray: z.array(z.number().nonnegative()).optional().describe("Dash pattern, e.g. [6, 3] = 6 pt dash, 3 pt gap."),
+  borderDashPhase: z.number().optional().describe("Offset into the dash pattern."),
   borderLineCap: LineCap.optional(),
-  blendMode: Blend.optional(),
+  blendMode,
 };
 
 const LINE_CAP = { butt: LineCapStyle.Butt, round: LineCapStyle.Round, projecting: LineCapStyle.Projecting } as const;
@@ -72,107 +98,131 @@ const RENDER_MODE = {
   invisible: TextRenderingMode.Invisible,
 } as const;
 
+/** One operation: its `op` name, fields, and a named, described schema ("AddPageOperation", …). */
+function op<N extends string, T extends z.ZodRawShape>(name: N, description: string, shape: T) {
+  return z.object({ op: z.literal(name), ...shape }).meta({ id: `${name[0].toUpperCase()}${name.slice(1)}Operation`, description });
+}
+
 // ---------- operations ----------
 
-export const Operation = z.discriminatedUnion("op", [
+const variants = [
   // pages
-  z.object({ op: z.literal("addPage"), size: PageSize.default("A4"), at: z.number().int().positive().optional(), count: z.number().int().positive().max(1000).default(1) }),
-  z.object({ op: z.literal("removePages"), pages: PageSpec }),
-  /** Keep only these pages, in this order. Use it to extract, reorder, reverse or repeat. */
-  z.object({ op: z.literal("selectPages"), pages: PageSpec }),
-  z.object({ op: z.literal("duplicatePage"), page: z.number().int(), at: z.number().int().positive().optional() }),
-  z.object({ op: z.literal("rotatePages"), pages: PageSpec.optional(), degrees: z.number().int().multipleOf(90), relative: z.boolean().default(true) }),
-  z.object({ op: z.literal("resizePages"), pages: PageSpec.optional(), size: PageSize, scaleContent: z.boolean().default(true) }),
-  z.object({ op: z.literal("cropPages"), pages: PageSpec.optional(), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() }),
-  /** Sets any of the five page boxes (media = paper, crop = visible, bleed/trim/art = print production). */
-  z.object({
-    op: z.literal("setPageBoxes"),
-    pages: PageSpec.optional(),
+  op("addPage", "Adds blank pages.", {
+    size: PageSize.default("A4"),
+    at,
+    count: z.number().int().positive().max(1000).default(1).describe("How many pages to add."),
+  }),
+  op("removePages", "Removes pages. At least one page must remain.", { pages: PageSpec.describe("Pages to remove.") }),
+  op("selectPages", "Keeps only these pages, in this order: use it to extract, reorder, reverse or repeat pages.", {
+    pages: PageSpec.describe('Pages to keep, in the new order. Repeats are allowed, e.g. "1,1,2".'),
+  }),
+  op("duplicatePage", "Copies one page.", {
+    page: z.number().int().describe("1-based page to copy; negatives count from the end."),
+    at: z.number().int().positive().optional().describe("1-based position for the copy. Default: right after the original."),
+  }),
+  op("rotatePages", "Rotates pages by a multiple of 90°.", {
+    pages: pagesField,
+    degrees: z.number().int().multipleOf(90).describe("Clockwise turn: 90, 180, 270 (or negative)."),
+    relative: z.boolean().default(true).describe("true adds to the current rotation; false sets it outright."),
+  }),
+  op("resizePages", "Changes the paper size.", {
+    pages: pagesField,
+    size: PageSize,
+    scaleContent: z.boolean().default(true).describe("true shrinks or grows the content to fit and centres it; false only changes the paper size."),
+  }),
+  op("cropPages", "Sets the visible area (crop box). Content outside it is hidden, not removed.", {
+    pages: pagesField,
+    x: z.number(),
+    y: z.number(),
+    width: z.number().positive(),
+    height: z.number().positive(),
+  }),
+  op("setPageBoxes", "Sets any of the five page boxes: media (paper), crop (visible area), bleed, trim and art (print production).", {
+    pages: pagesField,
     mediaBox: Rect.optional(),
     cropBox: Rect.optional(),
     bleedBox: Rect.optional(),
     trimBox: Rect.optional(),
     artBox: Rect.optional(),
   }),
-  /** Scales the whole page ("page"), only its content, or only its annotations/fields. */
-  z.object({
-    op: z.literal("scalePages"),
-    pages: PageSpec.optional(),
-    factor: z.union([z.number().positive(), z.tuple([z.number().positive(), z.number().positive()])]),
-    target: z.enum(["page", "content", "annotations"]).default("page"),
+  op("scalePages", "Scales pages.", {
+    pages: pagesField,
+    factor: z
+      .union([z.number().positive(), z.tuple([z.number().positive(), z.number().positive()])])
+      .describe("One factor for both directions, or [x, y]. 0.5 halves the size."),
+    target: z
+      .enum(["page", "content", "annotations"])
+      .default("page")
+      .describe('"page" scales the paper, content and form fields together; "content" or "annotations" scale only those.'),
   }),
-  z.object({ op: z.literal("translateContent"), pages: PageSpec.optional(), x: z.number(), y: z.number() }),
-  /** Inserts PDF pages, or a PNG/JPEG image as a page. */
-  z.object({ op: z.literal("insertPdf"), source: PdfSource, pages: PageSpec.optional(), at: z.number().int().positive().optional(), ...ImagePageOptions }),
+  op("translateContent", "Moves everything drawn on the page by (x, y) points.", { pages: pagesField, x: z.number(), y: z.number() }),
+  op("insertPdf", "Inserts pages from another PDF, or a PNG/JPEG image as a new page.", {
+    source: PdfSource.describe("The PDF or image to insert."),
+    pages: PageSpec.optional().describe("PDFs only: which pages to insert. Default: all."),
+    at,
+    ...ImagePageOptions,
+  }),
 
   // drawing
-  z.object({
-    op: z.literal("drawText"),
-    pages: PageSpec.optional(),
-    text: z.string(),
+  op("drawText", "Draws text.", {
+    pages: pagesField,
+    text: z.string().describe('The text. "\\n" starts a new line.'),
     x: z.number(),
-    y: z.number(),
+    y: z.number().describe("Baseline of the first line (bottom-left origin), or top of the text (top-left origin)."),
     origin: Origin,
-    size: z.number().positive().default(12),
+    size: z.number().positive().default(12).describe("Font size in points."),
     font: Font.default(StandardFonts.Helvetica),
     color: Color.default("#000000"),
     opacity: Opacity.optional(),
-    rotate: z.number().optional(),
+    rotate,
     ...skew,
-    maxWidth: z.number().positive().optional(),
-    lineHeight: z.number().positive().optional(),
-    /** Characters after which a line may wrap (with maxWidth). Default: spaces. */
-    wordBreaks: z.array(z.string()).optional(),
-    characterSpacing: z.number().optional(),
-    renderMode: z.enum(["fill", "outline", "fillAndOutline", "invisible"]).optional(),
-    strokeColor: Color.optional(),
-    strokeWidth: z.number().nonnegative().optional(),
-    blendMode: Blend.optional(),
+    maxWidth: z.number().positive().optional().describe("Wrap lines at this width, in points."),
+    lineHeight: z.number().positive().optional().describe("Distance between baselines. Default: 1.2 × size."),
+    wordBreaks: z.array(z.string()).optional().describe('Characters after which a line may wrap (with maxWidth). Default: [" "].'),
+    characterSpacing: z.number().optional().describe("Extra space between characters, in points."),
+    renderMode: z.enum(["fill", "outline", "fillAndOutline", "invisible"]).optional().describe('"invisible" text can still be selected and searched.'),
+    strokeColor: Color.optional().describe("Outline colour, for the outline render modes."),
+    strokeWidth: z.number().nonnegative().optional().describe("Outline width in points."),
+    blendMode,
   }),
-  z.object({
-    op: z.literal("drawImage"),
-    pages: PageSpec.optional(),
-    image: Source,
+  op("drawImage", "Draws a PNG or JPEG. JPEG photos are turned upright using their EXIF orientation.", {
+    pages: pagesField,
+    image: Source.describe("A PNG or JPEG."),
     x: z.number(),
-    y: z.number(),
+    y: z.number().describe("Bottom edge (bottom-left origin) or top edge (top-left origin) of the image."),
     origin: Origin,
-    width: z.number().positive().optional(),
+    width: z.number().positive().optional().describe("Width in points. Give one of width/height to keep the aspect ratio; neither draws 1 px per point."),
     height: z.number().positive().optional(),
     opacity: Opacity.optional(),
-    rotate: z.number().optional(),
+    rotate,
     ...skew,
-    blendMode: Blend.optional(),
+    blendMode,
   }),
-  z.object({
-    op: z.literal("drawRectangle"),
-    pages: PageSpec.optional(),
+  op("drawRectangle", "Draws a rectangle, optionally with rounded corners.", {
+    pages: pagesField,
     x: z.number(),
-    y: z.number(),
+    y: z.number().describe("Bottom edge (bottom-left origin) or top edge (top-left origin)."),
     origin: Origin,
     width: z.number(),
     height: z.number(),
-    /** Corner radii for rounded rectangles. */
-    rx: z.number().nonnegative().optional(),
-    ry: z.number().nonnegative().optional(),
-    rotate: z.number().optional(),
+    rx: z.number().nonnegative().optional().describe("Horizontal corner radius."),
+    ry: z.number().nonnegative().optional().describe("Vertical corner radius."),
+    rotate,
     ...skew,
     ...shapeStyle,
   }),
-  /** Ellipse or circle centred on (x, y). */
-  z.object({
-    op: z.literal("drawEllipse"),
-    pages: PageSpec.optional(),
+  op("drawEllipse", "Draws an ellipse or circle centred on (x, y).", {
+    pages: pagesField,
     x: z.number(),
     y: z.number(),
     origin: Origin,
     xRadius: z.number().positive(),
-    yRadius: z.number().positive().optional(),
-    rotate: z.number().optional(),
+    yRadius: z.number().positive().optional().describe("Default: xRadius (a circle)."),
+    rotate,
     ...shapeStyle,
   }),
-  z.object({
-    op: z.literal("drawLine"),
-    pages: PageSpec.optional(),
+  op("drawLine", "Draws a straight line.", {
+    pages: pagesField,
     start: Point,
     end: Point,
     origin: Origin,
@@ -180,234 +230,230 @@ export const Operation = z.discriminatedUnion("op", [
     color: Color.default("#000000"),
     opacity: Opacity.optional(),
     lineCap: LineCap.optional(),
-    dashArray: z.array(z.number().nonnegative()).optional(),
+    dashArray: z.array(z.number().nonnegative()).optional().describe("Dash pattern, e.g. [6, 3]."),
     dashPhase: z.number().optional(),
-    blendMode: Blend.optional(),
+    blendMode,
   }),
-  /** An SVG path ("M 0 0 L 100 0 …"); its y axis points down from (x, y). */
-  z.object({
-    op: z.literal("drawSvgPath"),
-    pages: PageSpec.optional(),
-    path: z.string().min(1),
+  op("drawSvgPath", "Draws an SVG path. Its y axis points down from (x, y). Fills black when neither colour nor border is given.", {
+    pages: pagesField,
+    path: z.string().min(1).describe('SVG path data, e.g. "M 0 0 L 100 0 L 50 80 Z".'),
     x: z.number(),
     y: z.number(),
     origin: Origin,
     scale: z.number().positive().optional(),
-    rotate: z.number().optional(),
+    rotate,
     fillRule: z.enum(["nonzero", "evenodd"]).optional(),
     ...shapeStyle,
   }),
-  z.object({
-    op: z.literal("drawSvg"),
-    pages: PageSpec.optional(),
-    svg: z.string().min(1),
+  op("drawSvg", "Draws an SVG document (shapes, text, transforms).", {
+    pages: pagesField,
+    svg: z.string().min(1).describe("SVG markup."),
     x: z.number(),
-    y: z.number(),
+    y: z.number().describe("Top-left corner of the SVG."),
     origin: Origin,
     width: z.number().positive().optional(),
     height: z.number().positive().optional(),
-    /** Default size for SVG text. */
-    fontSize: z.number().positive().optional(),
-    /** Fonts for SVG text, by the font-family name used in the SVG. */
-    fonts: z.record(z.string(), Font).optional(),
-    blendMode: Blend.optional(),
+    fontSize: z.number().positive().optional().describe("Default size for SVG text."),
+    fonts: z.record(z.string(), Font).optional().describe("Fonts for SVG text, keyed by the font-family name used in the SVG."),
+    blendMode,
   }),
-  /** Draws a page of another PDF onto pages: letterheads, stamps, several pages on one sheet. */
-  z.object({
-    op: z.literal("drawPdfPage"),
-    pages: PageSpec.optional(),
-    source: PdfSource,
-    page: z.number().int().default(1),
-    /** Part of the source page to use, in its own coordinates. */
-    clip: z.object({ left: z.number(), bottom: z.number(), right: z.number(), top: z.number() }).optional(),
+  op("drawPdfPage", "Draws a page of another PDF onto pages: letterheads, backgrounds, stamps, several pages on one sheet.", {
+    pages: pagesField,
+    source: PdfSource.describe("The PDF to take the page from."),
+    page: z.number().int().default(1).describe("1-based page of the source; negatives count from the end."),
+    clip: z
+      .object({ left: z.number(), bottom: z.number(), right: z.number(), top: z.number() })
+      .optional()
+      .describe("Part of the source page to use, in its own coordinates. Default: the whole page."),
     x: z.number().default(0),
-    y: z.number().default(0),
+    y: z.number().default(0).describe("Bottom edge (bottom-left origin) or top edge (top-left origin)."),
     origin: Origin,
-    width: z.number().positive().optional(),
+    width: z.number().positive().optional().describe("Give one of width/height to keep the aspect ratio."),
     height: z.number().positive().optional(),
-    scale: z.number().positive().optional(),
+    scale: z.number().positive().optional().describe("Alternative to width/height: a factor of the source size."),
     opacity: Opacity.optional(),
-    rotate: z.number().optional(),
+    rotate,
     ...skew,
-    blendMode: Blend.optional(),
-    /** Put it behind the page's existing content (e.g. a letterhead background). */
-    behind: z.boolean().default(false),
+    blendMode,
+    behind: z.boolean().default(false).describe("Draw under the page's existing content, e.g. a letterhead background."),
   }),
   z
     .object({
       op: z.literal("watermark"),
-      pages: PageSpec.optional(),
-      /** Text to stamp, or… */
-      text: z.string().min(1).optional(),
-      /** …a PNG/JPEG image, e.g. a logo. */
-      image: Source.optional(),
-      /** Image width as a share of the page width. */
-      scale: z.number().positive().max(1).default(0.5),
-      size: z.number().positive().default(60),
+      pages: pagesField,
+      text: z.string().min(1).optional().describe("Text to stamp. Give text or image."),
+      image: Source.optional().describe("A PNG or JPEG to stamp, e.g. a logo. Give text or image."),
+      scale: z.number().positive().max(1).default(0.5).describe("Images: width as a share of the page width."),
+      size: z.number().positive().default(60).describe("Text: font size."),
       font: Font.default(StandardFonts.HelveticaBold),
       color: Color.default("#888888"),
       opacity: Opacity.default(0.25),
-      /** Degrees; defaults to 45 for text, 0 for images. */
-      rotate: z.number().optional(),
+      rotate: z.number().optional().describe("Degrees, counter-clockwise. Default: 45 for text, 0 for images."),
       position: Position.default("center"),
-      margin: z.number().nonnegative().default(24),
-      blendMode: Blend.optional(),
+      margin: z.number().nonnegative().default(24).describe("Distance from the page edge, for corner positions."),
+      blendMode,
     })
-    .refine((o) => !o.text !== !o.image, "Give text or image"),
-  z.object({
-    op: z.literal("pageNumbers"),
-    pages: PageSpec.optional(),
-    /** {page} and {total} are replaced. */
-    format: z.string().default("{page} / {total}"),
-    position: z.enum(["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"]).default("bottom-center"),
+    .refine((o) => !o.text !== !o.image, "Give text or image")
+    .meta({
+      id: "WatermarkOperation",
+      description: "Stamps text or an image (give one) on each page, centred or in a corner, at any angle and opacity.",
+    }),
+  op("pageNumbers", "Writes page numbers.", {
+    pages: pagesField,
+    format: z.string().default("{page} / {total}").describe('Text to write; "{page}" and "{total}" are replaced.'),
+    position: z
+      .enum(["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"])
+      .default("bottom-center"),
     margin: z.number().nonnegative().default(24),
     size: z.number().positive().default(10),
     font: Font.default(StandardFonts.Helvetica),
     color: Color.default("#000000"),
-    startAt: z.number().int().default(1),
+    startAt: z.number().int().default(1).describe("Number of the first page."),
   }),
 
   // forms
-  z.object({
-    op: z.literal("fillForm"),
-    /** Text fields take strings; checkboxes booleans; dropdowns, option lists and radio groups option values. */
-    fields: z.record(z.string(), z.union([z.string(), z.boolean(), z.array(z.string())])).default({}),
-    /** Images for text fields or buttons (e.g. a signature box), by field name. */
-    images: z.record(z.string(), Source).optional(),
+  op("fillForm", "Fills form fields by name (see /pdf/info for names and types).", {
+    fields: z
+      .record(z.string(), z.union([z.string(), z.boolean(), z.array(z.string())]))
+      .default({})
+      .describe("Text fields take a string; checkboxes true/false; dropdowns and option lists an option or array of options; radio groups an option."),
+    images: z.record(z.string(), Source).optional().describe("Images for text fields or buttons, by field name (e.g. a signature box)."),
     imageAlignment: Alignment.optional(),
-    flatten: z.boolean().default(false),
-    /** Fail on unknown field names instead of ignoring them. */
-    strict: z.boolean().default(true),
-    /** Font for the filled-in values. Use a TTF/OTF file for non-Latin text. Default: Helvetica. */
-    font: Font.optional(),
+    flatten: z.boolean().default(false).describe("Turn the fields into plain page content afterwards, so they can no longer be edited."),
+    strict: z.boolean().default(true).describe("Fail on unknown field names instead of ignoring them."),
+    font: Font.optional().describe("Font for the filled-in values. Default: Helvetica. Use a font file for non-Latin text."),
   }),
-  z.object({ op: z.literal("flattenForm"), font: Font.optional() }),
-  z.object({
-    op: z.literal("addFormField"),
+  op("flattenForm", "Turns all form fields into plain page content.", { font: Font.optional().describe("Font used to draw the values. Default: Helvetica.") }),
+  op("addFormField", "Creates a form field. Text, checkbox, dropdown, optionList and button need page, x, y, width and height; radio needs choices.", {
     type: z.enum(["text", "checkbox", "dropdown", "optionList", "radio", "button"]),
-    name: z.string().min(1),
-    page: z.number().int().default(1),
+    name: z.string().min(1).describe("Unique field name."),
+    page: z.number().int().default(1).describe("1-based page."),
     x: z.number().optional(),
-    y: z.number().optional(),
+    y: z.number().optional().describe("Bottom edge (bottom-left origin) or top edge (top-left origin)."),
     width: z.number().positive().optional(),
     height: z.number().positive().optional(),
     origin: Origin,
-    /** Starting value: text, checkbox true/false, the selected option(s). */
-    value: z.union([z.string(), z.boolean(), z.array(z.string())]).optional(),
-    /** Radio buttons: one entry per choice, each with its own box. */
+    value: z.union([z.string(), z.boolean(), z.array(z.string())]).optional().describe("Starting value: text, checkbox true/false, the selected option(s)."),
     choices: z
-      .array(z.object({ value: z.string().min(1), page: z.number().int().optional(), x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() }))
-      .optional(),
-    /** Button caption. */
-    label: z.string().optional(),
+      .array(
+        z.object({
+          value: z.string().min(1),
+          page: z.number().int().optional().describe("Default: the field's page."),
+          x: z.number(),
+          y: z.number(),
+          width: z.number().positive(),
+          height: z.number().positive(),
+        }),
+      )
+      .optional()
+      .describe("Radio groups: one entry per choice, each with its own box."),
+    label: z.string().optional().describe("Button caption."),
     font: Font.optional(),
     textColor: Color.optional(),
     backgroundColor: Color.optional(),
     borderColor: Color.optional(),
-    borderWidth: z.number().nonnegative().optional(),
-    rotate: z.number().optional(),
+    borderWidth: z.number().nonnegative().optional().describe("Default: 1 when borderColor is set."),
+    rotate,
     hidden: z.boolean().optional(),
     ...fieldSettings,
   }),
-  z.object({
-    op: z.literal("setFieldProperties"),
+  op("setFieldProperties", "Changes a field's settings, or shows an image in it.", {
     name: z.string().min(1),
     ...fieldSettings,
-    image: Source.optional(),
+    image: Source.optional().describe("Text fields and buttons: an image to show in the field."),
     imageAlignment: Alignment.optional(),
-    /** Font used to redraw the field. Default: Helvetica. */
-    font: Font.optional(),
+    font: Font.optional().describe("Font used to redraw the field. Default: Helvetica."),
   }),
-  z.object({ op: z.literal("removeFormFields"), names: z.array(z.string().min(1)).min(1) }),
-  /** Replaces the script of a field's existing action. */
-  z.object({ op: z.literal("setFieldScript"), name: z.string().min(1), event: z.enum(FIELD_EVENTS), script: z.string() }),
+  op("removeFormFields", "Removes form fields.", { names: z.array(z.string().min(1)).min(1) }),
+  op("setFieldScript", "Replaces the script of a field's existing action (see /pdf/scripts). New actions cannot be added.", {
+    name: z.string().min(1),
+    event: z.enum(FIELD_EVENTS),
+    script: z.string(),
+  }),
 
   // scripts
-  /** Adds document-level JavaScript (runs when the PDF opens in a viewer that allows it). */
-  z.object({ op: z.literal("addJavaScript"), name: z.string().min(1), script: z.string() }),
-  /** Replaces a script in an XFA form. The source needs "preserveXFA": true. */
-  z.object({ op: z.literal("setXFAJavaScript"), field: z.string().min(1), event: z.string().min(1), script: z.string() }),
-  /** Removes XFA form data, leaving the regular (AcroForm) fields. */
-  z.object({ op: z.literal("deleteXFA") }),
+  op("addJavaScript", "Adds document-level JavaScript, run when the PDF opens in viewers that allow it.", {
+    name: z.string().min(1),
+    script: z.string(),
+  }),
+  op("setXFAJavaScript", 'Replaces a script in an XFA form. The source needs "preserveXFA": true.', {
+    field: z.string().min(1),
+    event: z.string().min(1).describe('XFA event, e.g. "event__click" (see /pdf/scripts).'),
+    script: z.string(),
+  }),
+  op("deleteXFA", "Removes XFA form data, leaving the regular form fields.", {}),
 
   // document
-  z.object({ op: z.literal("setLayerVisibility"), layers: z.array(z.object({ name: z.string(), visible: z.boolean() })).min(1) }),
-  z.object({
-    op: z.literal("setViewerPreferences"),
+  op("setLayerVisibility", "Shows or hides layers (optional content groups). See /pdf/info for layer names.", {
+    layers: z.array(z.object({ name: z.string(), visible: z.boolean() })).min(1),
+  }),
+  op("setViewerPreferences", "Controls how viewers open the PDF.", {
     hideToolbar: z.boolean().optional(),
     hideMenubar: z.boolean().optional(),
     hideWindowUI: z.boolean().optional(),
     fitWindow: z.boolean().optional(),
     centerWindow: z.boolean().optional(),
-    /** Show the title (not the file name) in the window bar. */
-    displayDocTitle: z.boolean().optional(),
-    pageMode: z.enum(["UseNone", "UseOutlines", "UseThumbs", "FullScreen", "UseOC", "UseAttachments"]).optional(),
+    displayDocTitle: z.boolean().optional().describe("Show the title, not the file name, in the window bar."),
+    pageMode: z.enum(["UseNone", "UseOutlines", "UseThumbs", "FullScreen", "UseOC", "UseAttachments"]).optional().describe("Which panel is open, or full screen."),
     pageLayout: z.enum(["SinglePage", "OneColumn", "TwoColumnLeft", "TwoColumnRight", "TwoPageLeft", "TwoPageRight"]).optional(),
-    nonFullScreenPageMode: z.enum(Object.values(NonFullScreenPageMode) as [string, ...string[]]).optional(),
+    nonFullScreenPageMode: z.enum(Object.values(NonFullScreenPageMode) as [string, ...string[]]).optional().describe("Panel shown after leaving full screen."),
     readingDirection: z.enum(Object.values(ReadingDirection) as [string, ...string[]]).optional(),
-    printScaling: z.enum(Object.values(PrintScaling) as [string, ...string[]]).optional(),
+    printScaling: z.enum(Object.values(PrintScaling) as [string, ...string[]]).optional().describe('Print dialog default; "None" prints at actual size.'),
     duplex: z.enum(Object.values(Duplex) as [string, ...string[]]).optional(),
     pickTrayByPDFSize: z.boolean().optional(),
-    printPageRange: PageSpec.optional(),
-    numCopies: z.number().int().min(1).max(5).optional(),
+    printPageRange: PageSpec.optional().describe("Print dialog's default page range."),
+    numCopies: z.number().int().min(1).max(5).optional().describe("Print dialog's default number of copies."),
   }),
-  z.object({
-    op: z.literal("setMetadata"),
+  op("setMetadata", "Sets document properties, copyright and custom fields, in both the Info dictionary and XMP. Run it before convertToPDFA.", {
     title: z.string().optional(),
-    /** Show the title instead of the file name in viewers' title bar. */
-    showTitleInWindow: z.boolean().optional(),
+    showTitleInWindow: z.boolean().optional().describe("Show the title instead of the file name in viewers' title bar."),
     author: z.string().optional(),
     subject: z.string().optional(),
     keywords: z.array(z.string()).optional(),
-    creator: z.string().optional(),
-    producer: z.string().optional(),
-    language: z.string().optional(),
+    creator: z.string().optional().describe("The application that made the original content."),
+    producer: z.string().optional().describe("The application that made the PDF."),
+    language: z.string().optional().describe('Language tag, e.g. "en-GB".'),
     creationDate: DateString.optional(),
-    modificationDate: DateString.optional(),
-    /** e.g. "© 2026 Acme Inc. All rights reserved." */
-    copyright: z.string().optional(),
-    /** Page with licence or ownership details. */
-    copyrightUrl: z.url().optional(),
-    /** Your own fields, e.g. { "MadeFor": "Client X", "Origin": "billing-service" }. null removes one. */
-    custom: z.record(z.string().regex(CUSTOM_KEY, "Custom keys are letters, digits and _, starting with a letter"), z.string().nullable()).optional(),
+    modificationDate: DateString.optional().describe("Default: now."),
+    copyright: z.string().optional().describe('e.g. "© 2026 Acme Inc. All rights reserved." Shown as Acrobat\'s copyright notice.'),
+    copyrightUrl: z.url().optional().describe("Page with licence or ownership details."),
+    custom: z
+      .record(z.string().regex(CUSTOM_KEY, "Custom keys are letters, digits and _, starting with a letter"), z.string().nullable())
+      .optional()
+      .describe('Your own fields, e.g. { "MadeFor": "Client X" }. Keys are letters, digits and _ (max 64). null removes a field.'),
   }),
-  z.object({
-    op: z.literal("attachFile"),
+  op("attachFile", "Embeds a file inside the PDF.", {
     file: Source,
-    name: z.string().min(1),
+    name: z.string().min(1).describe("File name shown in viewers."),
     mimeType: z.string().optional(),
     description: z.string().optional(),
     creationDate: DateString.optional(),
     modificationDate: DateString.optional(),
-    /** How the file relates to the PDF (PDF/A-3): Source, Data, Alternative, Supplement, … */
-    relationship: z.enum(["Source", "Data", "Alternative", "Supplement", "EncryptedPayload", "Schema", "Unspecified"]).optional(),
+    relationship: z
+      .enum(["Source", "Data", "Alternative", "Supplement", "EncryptedPayload", "Schema", "Unspecified"])
+      .optional()
+      .describe("How the file relates to the PDF (PDF/A-3 associated files)."),
   }),
-  z.object({ op: z.literal("detachFile"), name: z.string().min(1) }),
-  /** Adds what PDF/A needs (sRGB output intent, file ID, XMP). Text must use an embedded font file. */
-  z.object({
-    op: z.literal("convertToPDFA"),
+  op("detachFile", "Removes an embedded file.", { name: z.string().min(1) }),
+  op("convertToPDFA", "Adds what PDF/A requires (sRGB output intent, file ID, XMP). Text must use an embedded font file, and the PDF must not be encrypted.", {
     conformance: z.enum(["1B", "2B", "2U", "3B", "3U"]).default("3B"),
-    iccProfile: Source.optional(),
+    iccProfile: Source.optional().describe("ICC colour profile. Default: sRGB."),
     outputConditionIdentifier: z.string().optional(),
-    colorComponents: z.union([z.literal(1), z.literal(3), z.literal(4)]).optional(),
+    colorComponents: z.union([z.literal(1), z.literal(3), z.literal(4)]).optional().describe("Components of the ICC profile: 1 gray, 3 RGB, 4 CMYK."),
   }),
-  /** Makes a Factur-X / ZUGFeRD e-invoice: attaches the invoice XML and makes the PDF PDF/A-3. */
-  z.object({
-    op: z.literal("embedFacturX"),
-    xml: Source,
+  op("embedFacturX", "Makes a Factur-X / ZUGFeRD e-invoice: attaches your invoice XML and makes the PDF PDF/A-3. The XML is not generated or checked.", {
+    xml: Source.describe("The complete Factur-X / ZUGFeRD XML."),
     conformanceLevel: z.enum(["MINIMUM", "BASIC WL", "BASIC", "EN 16931", "EXTENDED", "XRECHNUNG"]).optional(),
     fileName: z.string().optional(),
     version: z.string().optional(),
     documentType: z.string().optional(),
     description: z.string().optional(),
   }),
-  z.object({
-    op: z.literal("encrypt"),
-    ownerPassword: z.string().min(1),
-    userPassword: z.string().optional(),
+  op("encrypt", "Password-protects the PDF. Applied when the file is saved.", {
+    ownerPassword: z.string().min(1).describe("Gives full access."),
+    userPassword: z.string().optional().describe("Needed to open the file. Empty or omitted: opens without a password, permissions still apply."),
     algorithm: z.enum(["AES-256", "AES-128", "RC4-128", "RC4-40"]).default("AES-256"),
-    /** Required for RC4, which is broken; only for viewers older than 2005. */
-    allowWeakCryptography: z.boolean().optional(),
+    allowWeakCryptography: z.boolean().optional().describe("Required for RC4, which is broken; only for viewers older than 2005."),
     permissions: z
       .object({
         printing: z.union([z.boolean(), z.enum(["lowResolution", "highResolution"])]).optional(),
@@ -418,11 +464,21 @@ export const Operation = z.discriminatedUnion("op", [
         contentAccessibility: z.boolean().optional(),
         documentAssembly: z.boolean().optional(),
       })
-      .optional(),
+      .optional()
+      .describe("What user-password holders may do. Everything is allowed unless set to false."),
   }),
-]);
+] as const;
+
+export const Operation = z.discriminatedUnion("op", variants).meta({
+  id: "Operation",
+  description: "One step of an `operations` list. Steps run in order.",
+  discriminator: {
+    propertyName: "op",
+    mapping: Object.fromEntries(variants.map((v) => [v.shape.op.value, `#/components/schemas/${z.globalRegistry.get(v)?.id}`])),
+  },
+});
 export type Operation = z.infer<typeof Operation>;
-export const Operations = z.array(Operation).max(500);
+export const Operations = z.array(Operation).max(500).describe("Steps to run, in order (max 500). A failing step is named in the error: operations[2] (removePages): …");
 
 /**
  * Adds a PDF's pages (or some of them) or a PNG/JPEG image as a page, at
@@ -954,6 +1010,7 @@ export class Editor {
                     type: "radio",
                     options: (op.choices ?? []).map((c) => ({ value: c.value, widget: toWidget(c.page ?? op.page, c.x, c.y, c.width, c.height) })),
                     selected: value === undefined ? undefined : String(value),
+                    mutuallyExclusive: op.mutuallyExclusive,
                   }
                 : op.type === "button"
                   ? { type: "button", label: op.label ?? "" }
@@ -966,6 +1023,7 @@ export class Editor {
       }
       case "setFieldProperties": {
         const field = this.field(op.name);
+        if (op.mutuallyExclusive !== undefined) throw badRequest("mutuallyExclusive can only be set when creating a radio group (addFormField)");
         applySettings(field, op);
         if (op.image) setFieldImage(field, (await this.image(op.image)).image, op.imageAlignment);
         else this.redrawField(field, await this.font(op.font ?? StandardFonts.Helvetica));

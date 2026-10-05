@@ -3,6 +3,7 @@ import {
   PDFCheckBox,
   PDFDocument,
   PDFDropdown,
+  PDFField,
   PDFName,
   PDFOptionList,
   PDFPage,
@@ -13,6 +14,7 @@ import {
 import { describeField } from "./forms";
 import { COPYRIGHT, COPYRIGHT_URL, customInfo, readXmp } from "./metadata";
 import { resolvePages } from "./pages";
+import type { InfoResponse, LockedInfoResponse, ScriptsResponse, TextResponse } from "./replies";
 
 const box = (b: { x: number; y: number; width: number; height: number }) => ({ x: b.x, y: b.y, width: b.width, height: b.height });
 
@@ -27,7 +29,7 @@ function pageInfo(p: PDFPage, i: number) {
   };
 }
 
-function fieldType(f: unknown): string {
+function fieldType(f: unknown): InfoResponse["form"]["fields"][number]["type"] {
   if (f instanceof PDFTextField) return "text";
   if (f instanceof PDFCheckBox) return "checkbox";
   if (f instanceof PDFDropdown) return "dropdown";
@@ -36,6 +38,15 @@ function fieldType(f: unknown): string {
   if (f instanceof PDFButton) return "button";
   if (f instanceof PDFSignature) return "signature";
   return "unknown";
+}
+
+/** A field's current value, and its choices where it has them. */
+function fieldValue(field: PDFField): Pick<InfoResponse["form"]["fields"][number], "value" | "options"> {
+  if (field instanceof PDFTextField) return { value: field.getText() ?? null };
+  if (field instanceof PDFCheckBox) return { value: field.isChecked() };
+  if (field instanceof PDFDropdown || field instanceof PDFOptionList) return { value: field.getSelected(), options: field.getOptions() };
+  if (field instanceof PDFRadioGroup) return { value: field.getSelected() ?? null, options: field.getOptions() };
+  return { value: null };
 }
 
 /** PDF/A part and level from the XMP packet, e.g. "3B". */
@@ -76,24 +87,14 @@ function viewerPreferences(doc: PDFDocument) {
 }
 
 /** Everything about a document except its content. Load with preserveXFA so XFA can be reported. */
-export function documentInfo(doc: PDFDocument) {
+export function documentInfo(doc: PDFDocument): InfoResponse {
   const custom = customInfo(doc);
-  let form: Record<string, unknown> = { fields: [], hasXFA: false, signatureFields: [] };
+  let form: InfoResponse["form"] = { hasXFA: false, fields: [], signatureFields: [] };
   try {
     const f = doc.getForm();
     form = {
       hasXFA: f.hasXFA(),
-      fields: f.getFields().map((field) => {
-        const type = fieldType(field);
-        const out: Record<string, unknown> = { name: field.getName(), type };
-        if (field instanceof PDFTextField) out.value = field.getText() ?? null;
-        else if (field instanceof PDFCheckBox) out.value = field.isChecked();
-        else if (field instanceof PDFDropdown || field instanceof PDFOptionList) Object.assign(out, { value: field.getSelected(), options: field.getOptions() });
-        else if (field instanceof PDFRadioGroup) Object.assign(out, { value: field.getSelected() ?? null, options: field.getOptions() });
-        else out.value = null;
-        out.settings = describeField(field);
-        return out;
-      }),
+      fields: f.getFields().map((field) => ({ name: field.getName(), type: fieldType(field), ...fieldValue(field), settings: describeField(field) })),
       signatureFields: f.getSignatureFields().map((s) => ({ name: s.name, source: s.source })),
     };
   } catch {
@@ -133,13 +134,13 @@ export function documentInfo(doc: PDFDocument) {
 }
 
 /** What can be read from an encrypted file without its password. */
-export function lockedInfo(doc: PDFDocument) {
+export function lockedInfo(doc: PDFDocument): LockedInfoResponse {
   return { pageCount: doc.getPageCount(), encrypted: true, needsPassword: true, pages: doc.getPages().map(pageInfo) };
 }
 
 type TextItem = { text: string; x: number; y: number; fontSize: number; fontFamily: string };
 
-export function extractText(doc: PDFDocument, pages: string | number[] | undefined, withItems: boolean) {
+export function extractText(doc: PDFDocument, pages: string | number[] | undefined, withItems: boolean): TextResponse["pages"] {
   const all = doc.getPages();
   return resolvePages(pages, all.length).map((i) => {
     const items: TextItem[] = [];
@@ -166,7 +167,7 @@ export function joinText(items: TextItem[]): string {
 }
 
 /** Document, XFA, field and page scripts. Load with preserveXFA to see XFA scripts. */
-export function documentScripts(doc: PDFDocument) {
+export function documentScripts(doc: PDFDocument): ScriptsResponse {
   const fields: { field: string; event: string; script: string }[] = [];
   try {
     for (const f of doc.getForm().getFields()) {

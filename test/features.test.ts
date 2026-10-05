@@ -153,6 +153,29 @@ describe("forms", () => {
     expect((await info(filled.key)).form.fields.find((f: any) => f.name === "fullName").value).toBe("Grace");
   });
 
+  it("creates radio groups whose same-value buttons turn on together, or not", async () => {
+    const choices = [
+      { value: "A", x: 50, y: 100, width: 14, height: 14 },
+      { value: "A", x: 80, y: 100, width: 14, height: 14 },
+      { value: "B", x: 110, y: 100, width: 14, height: 14 },
+    ];
+    const onButtons = async (mutuallyExclusive: boolean | undefined) => {
+      const out = await json(post("/pdf/create", { operations: [{ op: "addFormField", type: "radio", name: "r", choices, value: "A", mutuallyExclusive }] }));
+      const widgets = (await load(out.key)).getForm().getRadioGroup("r").acroField.getWidgets();
+      return widgets.map((w) => w.getAppearanceState()?.decodeText() !== "Off");
+    };
+    // Default and true: one button at a time, even when two share a value.
+    expect(await onButtons(undefined)).toEqual([false, true, false]);
+    expect(await onButtons(true)).toEqual([false, true, false]);
+    // false: every button sharing the chosen value turns on.
+    expect(await onButtons(false)).toEqual([true, true, false]);
+
+    const radio = await json(post("/pdf/create", { operations: [{ op: "addFormField", type: "radio", name: "r", choices }] }));
+    expect((await fail("/pdf/edit", { source: radio.key, operations: [{ op: "setFieldProperties", name: "r", mutuallyExclusive: false }] })).error).toContain(
+      "only be set when creating",
+    );
+  });
+
   it("changes, removes and images fields", async () => {
     const out = await edit({ base64: b64(await formPdf()) }, [
       { op: "setFieldProperties", name: "name", readOnly: true, alignment: "right", maxLength: 10, fontSize: 9 },

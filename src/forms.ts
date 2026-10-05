@@ -17,8 +17,9 @@ import {
 } from "@cantoo/pdf-lib";
 import { z } from "zod";
 import { badRequest } from "./errors";
+import type { FieldSettings } from "./replies";
 
-export const Alignment = z.enum(["left", "center", "right"]);
+export const Alignment = z.enum(["left", "center", "right"]).meta({ id: "Alignment", description: "Horizontal alignment." });
 const ALIGN = { left: TextAlignment.Left, center: TextAlignment.Center, right: TextAlignment.Right } as const;
 const IMAGE_ALIGN = { left: ImageAlignment.Left, center: ImageAlignment.Center, right: ImageAlignment.Right } as const;
 
@@ -35,37 +36,31 @@ export const FIELD_EVENTS = [
   "blur",
 ] as const;
 
-/** Settings that can be given when creating a field or changed later. */
+/** Settings that can be given when creating a field or changed later. A setting that doesn't fit the field's type is an error. */
 export const fieldSettings = {
   readOnly: z.boolean().optional(),
   required: z.boolean().optional(),
-  /** false keeps the field's value out of form submissions. */
-  exported: z.boolean().optional(),
-  // text fields
-  multiline: z.boolean().optional(),
-  /** null removes the limit. */
-  maxLength: z.number().int().positive().nullable().optional(),
-  alignment: Alignment.optional(),
-  /** 0 = auto-size. Text fields, dropdowns, option lists, buttons. */
-  fontSize: z.number().nonnegative().optional(),
-  password: z.boolean().optional(),
-  /** Spreads characters evenly over maxLength boxes (needs maxLength). */
-  comb: z.boolean().optional(),
-  spellCheck: z.boolean().optional(),
-  scroll: z.boolean().optional(),
-  richText: z.boolean().optional(),
-  fileSelect: z.boolean().optional(),
-  // dropdowns and option lists
-  options: z.array(z.string()).optional(),
-  editable: z.boolean().optional(),
-  sort: z.boolean().optional(),
-  multiselect: z.boolean().optional(),
-  selectOnClick: z.boolean().optional(),
-  // radio groups
-  /** Clicking the selected option clears it. */
-  offToggle: z.boolean().optional(),
-  /** Options with the same value turn on together. false makes them independent. */
-  mutuallyExclusive: z.boolean().optional(),
+  exported: z.boolean().optional().describe("false keeps the field's value out of form submissions."),
+  multiline: z.boolean().optional().describe("Text fields."),
+  maxLength: z.number().int().positive().nullable().optional().describe("Text fields: maximum characters; null removes the limit."),
+  alignment: Alignment.optional().describe("Text fields."),
+  fontSize: z.number().nonnegative().optional().describe("Text fields, dropdowns, option lists and buttons. 0 = auto-size."),
+  password: z.boolean().optional().describe("Text fields: hide the characters typed."),
+  comb: z.boolean().optional().describe("Text fields: one character per box across the field's width (needs maxLength)."),
+  spellCheck: z.boolean().optional().describe("Text fields and dropdowns."),
+  scroll: z.boolean().optional().describe("Text fields: allow text longer than the box."),
+  richText: z.boolean().optional().describe("Text fields."),
+  fileSelect: z.boolean().optional().describe("Text fields: the value is a file path."),
+  options: z.array(z.string()).optional().describe("Dropdowns and option lists: the choices."),
+  editable: z.boolean().optional().describe("Dropdowns: allow typing a value not in the list."),
+  sort: z.boolean().optional().describe("Dropdowns and option lists."),
+  multiselect: z.boolean().optional().describe("Dropdowns and option lists."),
+  selectOnClick: z.boolean().optional().describe("Dropdowns and option lists: commit the choice as soon as it is clicked."),
+  offToggle: z.boolean().optional().describe("Radio groups: clicking the selected option clears it."),
+  mutuallyExclusive: z
+    .boolean()
+    .optional()
+    .describe("Radio groups, addFormField only: true (default) turns on one button at a time; false turns on every button sharing the chosen value."),
 };
 type Settings = { [K in keyof typeof fieldSettings]?: z.infer<(typeof fieldSettings)[K]> };
 
@@ -149,7 +144,7 @@ export type NewField =
   | { type: "text"; value?: string }
   | { type: "checkbox"; checked?: boolean }
   | { type: "dropdown" | "optionList"; options: string[]; selected?: string | string[] }
-  | { type: "radio"; options: { value: string; widget: Widget }[]; selected?: string }
+  | { type: "radio"; options: { value: string; widget: Widget }[]; selected?: string; mutuallyExclusive?: boolean }
   | { type: "button"; label: string };
 
 /** Creates a form field and puts it on the page(s). */
@@ -184,6 +179,8 @@ export function createField(doc: PDFDocument, name: string, spec: NewField, widg
     case "radio": {
       if (!spec.options.length) throw badRequest(`Radio group "${name}" needs at least one option`);
       const f = form.createRadioGroup(name);
+      // Decides how each button is wired as it is added, so it must come first.
+      if (spec.mutuallyExclusive === false) f.disableMutualExclusion();
       for (const o of spec.options) f.addOptionToPage(o.value, o.widget.page, appearance(o.widget));
       if (spec.selected !== undefined) f.select(spec.selected);
       return f;
@@ -206,8 +203,8 @@ export function setFieldScript(field: PDFField, event: (typeof FIELD_EVENTS)[num
 }
 
 /** A field's settings, for /pdf/info. */
-export function describeField(f: PDFField) {
-  const out: Record<string, unknown> = { readOnly: f.isReadOnly(), required: f.isRequired(), exported: f.isExported() };
+export function describeField(f: PDFField): FieldSettings {
+  const out: FieldSettings = { readOnly: f.isReadOnly(), required: f.isRequired(), exported: f.isExported() };
   if (f instanceof PDFTextField) {
     Object.assign(out, {
       multiline: f.isMultiline(),
