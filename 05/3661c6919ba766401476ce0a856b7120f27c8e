@@ -1,0 +1,21 @@
+test/api.test.ts
+  s_11a02fa3fb7722::t_f28704217ce446 50-68
+src/index.ts
+  s_11a02fa3fb7722::t_41ac200b4a4604 129,150-161,229
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "053661c6919ba766401476ce0a856b7120f27c8e",
+  "prompts": {},
+  "sessions": {
+    "s_11a02fa3fb7722": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "24159d53-2c36-4ac6-a170-c654d0a1d84c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bogdan Kharchenko <scriptor@gmail.com>"
+    }
+  }
+}
