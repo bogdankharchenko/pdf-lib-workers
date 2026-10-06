@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "pdfmill",
-    "version": "0.3.0",
-    "description": "Edit, merge, split, fill, stamp and inspect PDFs. Results are stored in R2 and returned as signed links.\n\n**Workflow that works well:**\n1. **Inspect first.** `POST /pdf/info` returns pages, sizes, form fields (names, types, choices), layers and attachments.\n2. **Act.** `/pdf/edit`, `/pdf/merge` and `/pdf/create` all take an `operations` list, run in order, so one request can build, stamp and lock a document.\n3. **Verify.** Run `/pdf/info` or `/pdf/text` on the result's `key`.\n\n**Sending files.** Any field typed Source, PdfSource or MergeSource accepts a URL string, an R2 key string, or an object: `{ \"url\" }` (optionally with `headers`), `{ \"key\" }`, `{ \"base64\" }`, or `{ \"upload\" }` naming a multipart file. Send files as multipart/form-data with the JSON body in an `options` field, or POST a PDF as the raw body with the JSON body URL-encoded in `?options=`.\n\n**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed `url` that works without the API key until `expiresAt`. Send `Accept: application/pdf` to get the bytes instead (with `X-File-Key`, `X-File-Url` and `X-Page-Count` headers); without it, or with `*/*`, the response is JSON. The API's own result links can be passed back in as sources.\n\n**Things that trip people up:**\n- Coordinates are PDF points (72 per inch) from the **bottom-left** corner. Add `\"origin\": \"top-left\"` to measure y down from the top.\n- Pages are **1-based**; negative numbers count from the end.\n- Built-in fonts cover Latin text only. Pass a font file for other scripts; text a font cannot draw is rejected (400), never replaced with \"?\".\n- Some sites block requests from Cloudflare Workers (403 from the source URL). Send those files as uploads or base64.\n- Opening a PDF with `password` saves the result **without** a password; add an `encrypt` operation to lock it again.\n- Run `setMetadata` before `convertToPDFA`.\n- Errors are JSON (ErrorResponse) and name the failing input, e.g. `operations[2] (removePages): Page 9 is out of range`.",
+    "version": "0.4.0",
+    "description": "Edit, merge, split, fill, stamp and inspect PDFs. Results are stored in R2 and returned as signed links.\n\n**Workflow that works well:**\n1. **Inspect first.** `POST /pdf/info` returns pages, sizes, form fields (names, types, choices), layers and attachments.\n2. **Act.** `/pdf/edit`, `/pdf/merge` and `/pdf/create` all take an `operations` list, run in order, so one request can build, stamp and lock a document.\n3. **Verify.** Run `/pdf/info` or `/pdf/text` on the result's `key`.\n\n**Sending files.** Any field typed Source, PdfSource or MergeSource accepts a URL string, an R2 key string, or an object: `{ \"url\" }` (optionally with `headers`), `{ \"key\" }`, `{ \"base64\" }`, or `{ \"upload\" }` naming a multipart file. Send files as multipart/form-data with the JSON body in an `options` field, or POST a PDF as the raw body with the JSON body URL-encoded in `?options=`.\n\n**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed `url` that works without the API key until `expiresAt`. Send `Accept: application/pdf` to get the bytes instead (with `X-File-Key`, `X-File-Url` and `X-Page-Count` headers); without it, or with `*/*`, the response is JSON. The API's own result links can be passed back in as sources. To keep the PDF out of R2 and out of the response, set `output.put` to a URL of yours, such as an S3 presigned upload URL: the Worker uploads the PDF there and replies with an UploadedPdf.\n\n**Things that trip people up:**\n- Coordinates are PDF points (72 per inch) from the **bottom-left** corner. Add `\"origin\": \"top-left\"` to measure y down from the top.\n- Pages are **1-based**; negative numbers count from the end.\n- Built-in fonts cover Latin text only. Pass a font file for other scripts; text a font cannot draw is rejected (400), never replaced with \"?\".\n- Some sites block requests from Cloudflare Workers (403 from the source URL). Send those files as uploads or base64.\n- Opening a PDF with `password` saves the result **without** a password; add an `encrypt` operation to lock it again.\n- Run `setMetadata` before `convertToPDFA`.\n- Errors are JSON (ErrorResponse) and name the failing input, e.g. `operations[2] (removePages): Page 9 is out of range`.",
     "contact": {
       "name": "pdfmill on GitHub",
       "url": "https://github.com/bogdankharchenko/pdfmill"
@@ -472,7 +472,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -482,7 +482,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -623,7 +623,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -633,7 +633,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -774,7 +774,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -784,7 +784,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -925,7 +925,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -935,7 +935,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -988,7 +988,7 @@
         },
         "responses": {
           "200": {
-            "description": "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). Errors are always JSON.",
+            "description": "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). With output.put the reply is always JSON. Errors are always JSON.",
             "headers": {
               "X-Page-Count": {
                 "description": "With the PDF bytes: number of pages.",
@@ -1090,7 +1090,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1100,7 +1100,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1171,7 +1171,7 @@
         },
         "responses": {
           "200": {
-            "description": "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). Errors are always JSON.",
+            "description": "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). With output.put the reply is always JSON. Errors are always JSON.",
             "headers": {
               "X-Page-Count": {
                 "description": "With the PDF bytes: number of pages.",
@@ -1273,7 +1273,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1283,7 +1283,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1336,7 +1336,7 @@
         },
         "responses": {
           "200": {
-            "description": "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). Errors are always JSON.",
+            "description": "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). With output.put the reply is always JSON. Errors are always JSON.",
             "headers": {
               "X-Page-Count": {
                 "description": "With the PDF bytes: number of pages.",
@@ -1438,7 +1438,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1448,7 +1448,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1589,7 +1589,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1599,7 +1599,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1722,7 +1722,7 @@
             }
           },
           "502": {
-            "description": "A URL source returned an error or could not be reached.",
+            "description": "A URL source or output.put returned an error or could not be reached.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1732,7 +1732,7 @@
             }
           },
           "504": {
-            "description": "A URL source timed out.",
+            "description": "A URL source or output.put timed out.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2437,6 +2437,30 @@
         ],
         "description": "A layer (optional content group) and whether it is shown."
       },
+      "PutTarget": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "http(s) URL the Worker PUTs the PDF to, such as an S3 presigned upload URL."
+          },
+          "headers": {
+            "description": "Extra request headers, e.g. ones the URL was signed with. Content-Type is \"application/pdf\" unless set here; Host and Content-Length come from the URL and the file.",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "description": "Where to upload the PDF, instead of saving it to R2."
+      },
       "Output": {
         "default": {
           "store": true,
@@ -2458,7 +2482,7 @@
           },
           "store": {
             "default": true,
-            "description": "Save to R2. With false, a JSON response carries the PDF as base64.",
+            "description": "Save to R2. With false, a JSON response carries the PDF as base64. Ignored with put.",
             "type": "boolean"
           },
           "linkTtl": {
@@ -2466,6 +2490,10 @@
             "exclusiveMinimum": 0,
             "maximum": 604800,
             "description": "Lifetime of the signed download link, in seconds (max 604800 = 7 days). Default: the SIGNED_URL_TTL setting (3600)."
+          },
+          "put": {
+            "description": "Upload the PDF to this URL instead of saving it to R2. The reply is an UploadedPdf, never the PDF itself.",
+            "$ref": "#/components/schemas/PutTarget"
           },
           "useObjectStreams": {
             "default": true,
@@ -5273,6 +5301,27 @@
         ],
         "description": "The PDF itself, for output.store: false."
       },
+      "UploadedPdf": {
+        "type": "object",
+        "properties": {
+          "size": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "File size in bytes."
+          },
+          "pageCount": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "size",
+          "pageCount"
+        ],
+        "description": "The PDF was uploaded to output.put.url."
+      },
       "PdfResult": {
         "anyOf": [
           {
@@ -5280,6 +5329,9 @@
           },
           {
             "$ref": "#/components/schemas/InlinePdf"
+          },
+          {
+            "$ref": "#/components/schemas/UploadedPdf"
           }
         ],
         "description": "Result of create, edit or merge as JSON (the default; see the Accept header)."

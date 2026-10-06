@@ -20,7 +20,7 @@ const DESCRIPTION = `Edit, merge, split, fill, stamp and inspect PDFs. Results a
 
 **Sending files.** Any field typed Source, PdfSource or MergeSource accepts a URL string, an R2 key string, or an object: \`{ "url" }\` (optionally with \`headers\`), \`{ "key" }\`, \`{ "base64" }\`, or \`{ "upload" }\` naming a multipart file. Send files as multipart/form-data with the JSON body in an \`options\` field, or POST a PDF as the raw body with the JSON body URL-encoded in \`?options=\`.
 
-**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed \`url\` that works without the API key until \`expiresAt\`. Send \`Accept: application/pdf\` to get the bytes instead (with \`X-File-Key\`, \`X-File-Url\` and \`X-Page-Count\` headers); without it, or with \`*/*\`, the response is JSON. The API's own result links can be passed back in as sources.
+**Getting results.** By default a PDF result is saved to R2 and returned as a PdfResult with a signed \`url\` that works without the API key until \`expiresAt\`. Send \`Accept: application/pdf\` to get the bytes instead (with \`X-File-Key\`, \`X-File-Url\` and \`X-Page-Count\` headers); without it, or with \`*/*\`, the response is JSON. The API's own result links can be passed back in as sources. To keep the PDF out of R2 and out of the response, set \`output.put\` to a URL of yours, such as an S3 presigned upload URL: the Worker uploads the PDF there and replies with an UploadedPdf.
 
 **Things that trip people up:**
 - Coordinates are PDF points (72 per inch) from the **bottom-left** corner. Add \`"origin": "top-left"\` to measure y down from the top.
@@ -66,14 +66,14 @@ const errors = {
   "413": error("A URL source is larger than the MAX_FETCH_BYTES setting."),
   "422": error("Not a PDF, a damaged PDF, a wrong or missing password, or an operation the PDF cannot support."),
   "500": error("API_KEY is not set, or an unexpected error."),
-  "502": error("A URL source returned an error or could not be reached."),
-  "504": error("A URL source timed out."),
+  "502": error("A URL source or output.put returned an error or could not be reached."),
+  "504": error("A URL source or output.put timed out."),
 };
 
 const pdfReply = {
   "200": {
     description:
-      "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). Errors are always JSON.",
+      "A PdfResult (JSON) by default, or the PDF bytes when the Accept header ranks application/pdf above application/json (at equal quality, the first listed wins). With output.put the reply is always JSON. Errors are always JSON.",
     headers: {
       "X-Page-Count": { description: "With the PDF bytes: number of pages.", schema: { type: "integer" } },
       "X-File-Key": { description: "With the PDF bytes, when stored: the R2 key.", schema: { type: "string" } },

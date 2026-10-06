@@ -130,16 +130,29 @@ export const R2Key = z
   .refine((k) => !k.startsWith("/") && !k.split("/").includes(".."), "Key must not start with / or contain ..")
   .describe('An R2 object key, e.g. "invoices/42.pdf". Must not start with "/" or contain "..".');
 
+export const PutTarget = z
+  .object({
+    url: z.url({ protocol: /^https?$/ }).describe("http(s) URL the Worker PUTs the PDF to, such as an S3 presigned upload URL."),
+    headers: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe('Extra request headers, e.g. ones the URL was signed with. Content-Type is "application/pdf" unless set here; Host and Content-Length come from the URL and the file.'),
+  })
+  .meta({ id: "PutTarget", description: "Where to upload the PDF, instead of saving it to R2." });
+export type PutTarget = z.infer<typeof PutTarget>;
+
 export const Output = z
   .object({
     key: R2Key.optional().describe(
       'Where to save in R2; overwrites an existing file. Default: "outputs/<uuid>.pdf", which the recommended expiry rule deletes after 7 days. Keys outside outputs/ and extracted/ are kept.',
     ),
     filename: z.string().max(255).optional().describe('Name offered when the PDF is opened or saved. Default: "document.pdf".'),
-    store: z.boolean().default(true).describe("Save to R2. With false, a JSON response carries the PDF as base64."),
+    store: z.boolean().default(true).describe("Save to R2. With false, a JSON response carries the PDF as base64. Ignored with put."),
     linkTtl: LinkTtl.optional(),
+    put: PutTarget.optional().describe("Upload the PDF to this URL instead of saving it to R2. The reply is an UploadedPdf, never the PDF itself."),
     useObjectStreams: z.boolean().default(true).describe("Compress objects into streams (smaller files). false writes a classic cross-reference table for old tools."),
   })
+  .refine((o) => !o.put || (o.key === undefined && o.linkTtl === undefined), "key and linkTtl are for R2; with put, the PDF is uploaded to put.url instead")
   .default({ store: true, useObjectStreams: true })
   .meta({
     id: "Output",

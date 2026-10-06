@@ -68,6 +68,8 @@ describe("openapi.json", () => {
 });
 
 describe("responses match their schemas", () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it("info, including a locked PDF", async () => {
     const out = await json(
       post("/pdf/edit", {
@@ -119,9 +121,12 @@ describe("responses match their schemas", () => {
     expectDocumented(MeasureResponse, await json(post("/text/measure", { text: "a", fitHeight: 20 })));
   });
 
-  describe("errors", () => {
-    afterEach(() => vi.restoreAllMocks());
+  it("PDF results uploaded with output.put", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null));
+    expectDocumented(PdfResult, await json(post("/pdf/create", { output: { put: { url: "https://bucket.test/a.pdf" } } })));
+  });
 
+  describe("errors", () => {
     it("use ErrorResponse for every status", async () => {
       const invalid = await errorBody(post("/pdf/edit", { operations: [{ op: "nope" }] }), 400);
       expect(invalid.details?.length).toBeGreaterThan(0);

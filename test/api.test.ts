@@ -452,6 +452,88 @@ describe("inputs: URLs and file data", () => {
   });
 });
 
+describe("output.put: uploads to your own storage", () => {
+  // A presigned upload URL: whoever holds the signature can write to the bucket.
+  const SIGNED = "https://bucket.test/pending-uploads/a.pdf?X-Amz-Signature=secret";
+  let received: { req: Request; body: Uint8Array }[];
+  let respond: (req: Request) => Response | Promise<Response>;
+
+  beforeEach(() => {
+    received = [];
+    respond = () => new Response(null);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const req = new Request(input as RequestInfo, init);
+      // Read the body here: it belongs to the Worker's request, which the test can't read from.
+      received.push({ req, body: new Uint8Array(await req.arrayBuffer()) });
+      return respond(req);
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("PUTs the PDF to the URL instead of R2, with the headers it was signed with", async () => {
+    const stored = async () => (await bucket.list({ prefix: "outputs/" })).objects.length;
+    const before = await stored();
+    const out = await json(
+      post("/pdf/merge", {
+        sources: [{ base64: b64(await samplePdf(2, "A")) }, { base64: b64(await samplePdf(1, "B")) }],
+        output: { put: { url: SIGNED, headers: { Host: "elsewhere.test", "Content-Length": "1", "x-amz-acl": "private" } } },
+      }),
+    );
+
+    expect(received).toHaveLength(1);
+    const [{ req, body: pdf }] = received;
+    expect(req.method).toBe("PUT");
+    expect(req.url).toBe(SIGNED);
+    expect(req.headers.get("content-type")).toBe("application/pdf");
+    expect(req.headers.get("x-amz-acl")).toBe("private");
+    expect(req.headers.get("host")).not.toBe("elsewhere.test");
+    expect(req.headers.get("content-length")).not.toBe("1");
+    expect(req.headers.has("content-disposition")).toBe(false);
+
+    expect(out).toEqual({ size: pdf.byteLength, pageCount: 3 });
+    expect((await json(post("/pdf/text", { source: { base64: b64(pdf) } }))).pages.map((p: any) => p.text)).toEqual(["A 1", "A 2", "B 1"]);
+    expect(await stored()).toBe(before);
+  });
+
+  it("names the file only when output.filename is given", async () => {
+    await json(post("/pdf/create", { output: { filename: "Report 42.pdf", put: { url: SIGNED } } }));
+    expect(received[0].req.headers.get("content-disposition")).toBe('inline; filename="Report 42.pdf"');
+  });
+
+  it("explains failed uploads without the URL's signature", async () => {
+    const error = async (res: Promise<Response>) => {
+      const r = await res;
+      return { status: r.status, error: (await r.json<any>()).error as string };
+    };
+    const create = () => post("/pdf/create", { output: { put: { url: SIGNED } } });
+
+    respond = () => new Response("<Error><Code>AccessDenied</Code></Error>", { status: 403 });
+    expect(await error(create())).toEqual({ status: 502, error: "output.put: https://bucket.test/pending-uploads/a.pdf returned HTTP 403" });
+
+    respond = () => new Response(null, { status: 307, headers: { location: "https://elsewhere.test/a.pdf" } });
+    expect(await error(create())).toEqual({ status: 502, error: "output.put: https://bucket.test/pending-uploads/a.pdf returned HTTP 307" });
+    expect(received.at(-1)!.req.redirect).toBe("manual");
+
+    respond = () => Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    expect(await error(create())).toEqual({ status: 504, error: "output.put: Timed out after 30s uploading to https://bucket.test/pending-uploads/a.pdf" });
+
+    respond = () => Promise.reject(new TypeError(`Network connection lost to ${SIGNED}`));
+    expect(await error(create())).toEqual({
+      status: 502,
+      error: "output.put: Could not upload to https://bucket.test/pending-uploads/a.pdf: Network connection lost to https://bucket.test/pending-uploads/a.pdf",
+    });
+  });
+
+  it("rejects R2 options, or asking for the PDF itself, alongside put", async () => {
+    const put = { url: SIGNED };
+    expect((await post("/pdf/create", { output: { put, key: "a.pdf" } })).status).toBe(400);
+    expect((await post("/pdf/create", { output: { put, linkTtl: 60 } })).status).toBe(400);
+    const bytes = await call("/pdf/create", { method: "POST", headers: { "content-type": "application/json", accept: "application/pdf" }, body: JSON.stringify({ output: { put } }) });
+    expect(bytes.status).toBe(400);
+    expect(received).toHaveLength(0);
+  });
+});
+
 /** A JPEG header only (enough to embed): w×h pixels, optional EXIF orientation. */
 function fakeJpeg(w: number, h: number, orientation?: number) {
   const bytes = [0xff, 0xd8];

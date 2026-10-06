@@ -11,7 +11,7 @@ import { Editor, Operation, addSource, checkText, embedFontSpec } from "./operat
 import { resolvePages } from "./pages";
 import type { ExtractResponse, MeasureResponse, PdfResult, SplitResponse } from "./replies";
 import { CreateRequest, EditRequest, ExtractRequest, InfoRequest, MeasureRequest, MergeRequest, ScriptsRequest, SplitRequest, TextRequest } from "./requests";
-import { type Output, R2Key, pageSize } from "./schemas";
+import { type Output, type PutTarget, R2Key, pageSize } from "./schemas";
 import { signedUrl, timingSafeEqual, verifySignature } from "./signing";
 import { imageKind } from "./images";
 import { type Ctx, type Upload, assignRefs, findUpload, loadPdf, looksLikePdf, openPdf, readAhead, readSource } from "./sources";
@@ -128,9 +128,19 @@ function wantsPdf(c: C): boolean {
   return accepts(c, { header: "Accept", supports: ["application/json", "application/pdf"], default: "application/json" }) === "application/pdf";
 }
 
-/** Saves `doc` (or appends to it, for incremental edits) and replies as JSON or PDF bytes, per the Accept header. */
+/**
+ * Saves `doc` (or appends to it, for incremental edits), then uploads it to
+ * output.put, or replies as JSON or PDF bytes, per the Accept header.
+ */
 async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { incremental?: boolean } = {}) {
+  c.header("Vary", "Accept");
+  if (output.put && wantsPdf(c)) throw badRequest("output.put uploads the PDF and replies with JSON; leave out Accept: application/pdf");
   const bytes = opts.incremental ? await doc.commit({ useObjectStreams: output.useObjectStreams }) : await doc.save({ useObjectStreams: output.useObjectStreams });
+  const facts = { size: bytes.byteLength, pageCount: doc.getPageCount() };
+  if (output.put) {
+    await putPdf(c.env, output.put, bytes, output.filename);
+    return c.json(facts satisfies PdfResult);
+  }
   const disposition = contentDisposition("inline", output.filename ?? "document.pdf");
   let key: string | undefined;
   let link: { url: string; expiresAt: string } | undefined;
@@ -139,7 +149,6 @@ async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { increment
     await c.env.PDF_BUCKET.put(key, bytes, { httpMetadata: { contentType: "application/pdf", contentDisposition: disposition } });
     link = await signedUrl(c.env, new URL(c.req.url).origin, key, output.linkTtl);
   }
-  c.header("Vary", "Accept");
   if (wantsPdf(c)) {
     const headers = new Headers({ "content-type": "application/pdf", "content-disposition": disposition, "x-page-count": String(doc.getPageCount()), vary: "Accept" });
     if (key && link) {
@@ -148,8 +157,32 @@ async function sendPdf(c: C, doc: PDFDocument, output: Output, opts: { increment
     }
     return new Response(bytes, { headers });
   }
-  const facts = { size: bytes.byteLength, pageCount: doc.getPageCount() };
   return c.json((key && link ? { key, ...link, ...facts } : { base64: bytesToBase64(bytes), ...facts }) satisfies PdfResult);
+}
+
+/**
+ * PUTs the PDF to `put.url`, e.g. an S3 presigned upload URL. Errors name the
+ * URL without its query string, which may carry a signature that allows writes.
+ */
+async function putPdf(env: Env, put: PutTarget, bytes: Uint8Array, filename?: string) {
+  const { origin, pathname } = new URL(put.url);
+  const url = origin + pathname;
+  const timeout = Number(env.FETCH_TIMEOUT_MS || 30000);
+  let res: Response;
+  try {
+    const headers = new Headers({ "content-type": "application/pdf" });
+    if (filename) headers.set("content-disposition", contentDisposition("inline", filename));
+    for (const [name, value] of Object.entries(put.headers ?? {})) {
+      if (!/^(host|content-length)$/i.test(name)) headers.set(name, value);
+    }
+    // A signed upload URL is valid for its own address only, so a redirect is a failure, not somewhere to follow.
+    res = await fetch(put.url, { method: "PUT", body: bytes, headers, redirect: "manual", signal: AbortSignal.timeout(timeout) });
+  } catch (e) {
+    if ((e as Error).name === "TimeoutError") throw new HttpError(504, `output.put: Timed out after ${timeout / 1000}s uploading to ${url}`);
+    throw new HttpError(502, `output.put: Could not upload to ${url}: ${(e as Error).message.replaceAll(put.url, url)}`);
+  }
+  await res.body?.cancel();
+  if (!res.ok) throw new HttpError(502, `output.put: ${url} returned HTTP ${res.status}`);
 }
 
 /**

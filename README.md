@@ -1,6 +1,6 @@
 # pdfmill
 
-A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.com/package/@cantoo/pdf-lib) and stores the results in a private R2 bucket. You send PDFs (and images, fonts) as URLs or file data; you get back a download link or the PDF itself.
+A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.com/package/@cantoo/pdf-lib) and stores the results in a private R2 bucket. You send PDFs (and images, fonts) as URLs or file data; you get back a download link or the PDF itself, or have it uploaded to your own storage.
 
 - [What you can do](#what-you-can-do) · [AI agents and client code](#ai-agents-and-client-code)
 - [Setup](#setup) · [Auth and access](#auth-and-access) · [Configuration](#configuration)
@@ -46,6 +46,7 @@ A Cloudflare Worker that edits PDFs with [`@cantoo/pdf-lib`](https://www.npmjs.c
 | **Extract text** (per page, optionally with positions and fonts) | `POST /pdf/text` |
 | **Chain** calls: feed one result into the next | pass the returned `key` or `url` as a source |
 | Get the result as a **link**, the **raw PDF**, or **base64** | JSON by default; `Accept: application/pdf` for the bytes; `output.store: false` for base64 |
+| **Upload** the result to your own storage (e.g. an S3 presigned URL) | `output.put` |
 | Write PDFs **old tools** can read (classic cross-reference table) | `output.useObjectStreams: false` |
 
 Every PDF-producing endpoint (`create`, `edit`, `merge`) takes the same `operations` list, run in order, so one request can stitch, watermark, number, tag and lock a document.
@@ -114,7 +115,7 @@ There are no upload, list or delete endpoints. Send inputs with each request. To
 | `SIGNING_KEY` | secret | `API_KEY` | HMAC key for download links |
 | `SIGNED_URL_TTL` | var | `3600` | Default link lifetime, seconds |
 | `MAX_FETCH_BYTES` | var | `52428800` (50 MB) | Largest file fetched from a URL source |
-| `FETCH_TIMEOUT_MS` | var | `30000` | Time limit per URL fetch |
+| `FETCH_TIMEOUT_MS` | var | `30000` | Time limit per URL fetch, and for the `output.put` upload |
 | `limits.cpu_ms` | wrangler | `300000` (5 min) | CPU time per request (paid plan) |
 
 Vars live in `wrangler.jsonc`; secrets are set with `wrangler secret put`.
@@ -161,6 +162,7 @@ They also take an optional `output`:
 | `filename` | `document.pdf` | Name offered when the PDF is opened or saved |
 | `store` | `true` | Save to R2. With `false`, a JSON reply carries the PDF as `base64`. |
 | `linkTtl` | `SIGNED_URL_TTL` | Link lifetime in seconds, up to 604800 (7 days) |
+| `put` | — | `{ "url", "headers"? }`: upload the PDF here instead of saving it to R2. See below |
 | `useObjectStreams` | `true` | `false` writes a classic cross-reference table (larger file, readable by old tools) |
 
 JSON reply:
@@ -175,6 +177,15 @@ With `Accept: application/pdf`, the headers `X-Page-Count`, and when stored `X-F
 ```sh
 curl -s -H "$H" -H 'Content-Type: application/json' -H 'Accept: application/pdf' "$API/pdf/create" -d '{}' -o new.pdf -D -
 ```
+
+To have the result land in your own storage, never in R2 or in the response, give `output.put` a URL the Worker can `PUT` to, such as an S3 presigned upload URL:
+
+```json
+{ "sources": ["https://…/a.pdf", "https://…/b.pdf"],
+  "output": { "put": { "url": "https://my-bucket.s3.amazonaws.com/reports/42.pdf?X-Amz-Signature=…" } } }
+```
+
+The upload is sent with `Content-Type: application/pdf`, plus `Content-Disposition` when `filename` is set, plus any `headers` you give (such as ones the URL was signed with; `Host` and `Content-Length` are ignored). Redirects are not followed. The reply is JSON with only `size` and `pageCount`, and `key`, `linkTtl` and `Accept: application/pdf` are rejected alongside `put`. If the upload fails (502) or times out (504), the error names the URL without its query string, so the signature is not repeated.
 
 Download a stored result with `GET /files/<key>` (with the key) or its signed `url` (without). Supports `Range` requests (for PDF viewers) and `If-None-Match`; add `?download` to force a save dialog.
 
