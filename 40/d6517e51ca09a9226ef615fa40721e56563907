@@ -1,0 +1,47 @@
+src/schemas.ts
+  s_3ceadfe1146a8b::t_5a1f5dffdc9292 133-143,150,152,155
+src/replies.ts
+  s_3ceadfe1146a8b::t_a4eeba12fd29b2 29-31
+test/api.test.ts
+  s_3ceadfe1146a8b::t_65700de7598d81 455-532
+  s_3ceadfe1146a8b::t_1ced90c7cadd0a 533
+src/openapi.ts
+  s_3ceadfe1146a8b::t_c2c211966e1e57 76
+  s_3ceadfe1146a8b::t_c0a7bfcfce1ae0 69-70
+  s_3ceadfe1146a8b::t_5a339a7680f07c 23
+src/index.ts
+  s_3ceadfe1146a8b::t_472928c520d974 178
+  s_3ceadfe1146a8b::t_9855118b5c5ba2 181-182,185
+  s_3ceadfe1146a8b::t_c6f4d4154d9414 14
+  s_3ceadfe1146a8b::t_cdcf24a750623c 131-134,136-137,139-143
+  s_3ceadfe1146a8b::t_2d0a176ceeb415 163-168,170-177,179-180,183-184
+  s_3ceadfe1146a8b::t_08a112ac1fe5af 169
+  s_3ceadfe1146a8b::t_8898e54f51f117 186-187
+test/openapi.test.ts
+  s_3ceadfe1146a8b::t_a2202b54172ff2 71-72
+  s_3ceadfe1146a8b::t_ade22ea0134bc5 124-127,129
+README.md
+  s_3ceadfe1146a8b::t_1d78219ec8e988 3,49,118,165,181-189
+openapi.json
+  s_3ceadfe1146a8b::t_64fa929b431427 5-6,475,485,626,636,777,787,928,938,991,1093,1103,1174,1276,1286,1339,1441,1451,1592,1602,1725,1735,2440-2463,2485,2494-2497,5304-5324,5332-5334
+package-lock.json
+  s_3ceadfe1146a8b::t_4c2bed1696e633 3,9
+package.json
+  s_3ceadfe1146a8b::t_e2f2484537c793 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "40d6517e51ca09a9226ef615fa40721e56563907",
+  "prompts": {},
+  "sessions": {
+    "s_3ceadfe1146a8b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "948cdd19-baca-44f9-b5c6-79484df491d7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bogdan Kharchenko <scriptor@gmail.com>"
+    }
+  }
+}
